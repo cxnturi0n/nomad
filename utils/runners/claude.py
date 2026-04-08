@@ -70,7 +70,6 @@ class ClaudeRunner(BaseRunner):
             f'--system-prompt "$(cat \'{sys_file}\')" '
             f'--output-format json '
             f'--max-turns {max_turns} '
-            f'--max-tokens 16000 '
             f'--allowedTools "{tool_str}"'
         )
 
