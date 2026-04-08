@@ -29,8 +29,8 @@ class StaticAnalysisAgent(BaseAgent):
     name = "a2_static_analysis"
     description = "Static source code analysis — hunts for security vulnerabilities"
     tools = "read_only"
-    max_turns = 200  # may need many turns for thorough analysis
-    timeout = 6000  
+    max_turns = 75  # may need many turns for thorough analysis
+    timeout = 900   # 15 min — deep analysis of large modules takes time
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner,
                  scope_name: str = "full"):
@@ -49,6 +49,7 @@ class StaticAnalysisAgent(BaseAgent):
 
         recon = context.get("recon_report", {})
         partition = context.get("partition", {})
+        max_findings = context.get("max_findings", 25)
 
         # Build a focused context injection from the recon report
         recon_summary = self._build_recon_context(recon, partition)
@@ -65,6 +66,16 @@ class StaticAnalysisAgent(BaseAgent):
 2. For each entry point and data flow, trace user input from source to sink.
 3. Check every vulnerability class from your checklist.
 4. Report only confirmed vulnerabilities you can back with actual code.
+
+## OUTPUT CONSTRAINTS
+
+- Report a MAXIMUM of {max_findings} findings, strictly prioritized by severity (critical first, then high, then medium, then low).
+- If you find more than {max_findings}, report ONLY the top {max_findings}.
+- Keep code_snippet to 1-2 lines maximum — the relevant line only.
+- Keep description under 100 words.
+- Keep remediation under 80 words — show the fix pattern ONCE, do not repeat for every instance.
+- Keep attack_scenario under 60 words.
+- If the SAME vulnerability pattern appears in multiple files, report it ONCE and list all affected files in the description.
 
 Respond with ONLY the JSON object as specified in your instructions.
 No markdown, no prose — just valid JSON starting with {{ and ending with }}."""

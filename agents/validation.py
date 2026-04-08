@@ -32,7 +32,7 @@ class ValidationAgent(BaseAgent):
     name = "a7_validation"
     description = "Exploit validation — confirms vulnerabilities with adaptive PoC testing"
     tools = "read_write"  # needs bash for curl
-    max_turns = 80
+    max_turns = 600
     timeout = 900  # 15 min
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner):

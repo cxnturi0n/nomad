@@ -69,10 +69,10 @@ def run_trufflehog(repo_path: str, timeout: int = 120) -> ToolResult:
         proc = subprocess.run(
             [
                 "trufflehog", "filesystem",
-                repo_path,
+                "--directory", repo_path,
                 "--json",
                 "--no-update",
-                "--only-verified",  # include unverified too
+                "--only-verified=false",  # include unverified too
             ],
             capture_output=True,
             text=True,
@@ -318,6 +318,12 @@ class SecretsAgent(BaseAgent):
             "3. Manually scan configuration files, environment files, and source code for secrets the tools may have missed.\n"
             "4. For each confirmed secret, classify its type, service, severity, and assess if it's likely active.\n"
             "5. Provide remediation for every confirmed finding.\n\n"
+            "## OUTPUT CONSTRAINTS\n\n"
+            "- Report a MAXIMUM of 20 findings, prioritized by severity.\n"
+            "- Prioritize active production secrets over test/example data.\n"
+            "- If the SAME secret type appears in multiple files, report it ONCE and list all affected files in the description.\n"
+            "- Keep description under 80 words.\n"
+            "- Keep remediation under 60 words.\n\n"
             "Respond with ONLY the JSON object as specified in your instructions.\n"
             "No markdown, no prose — just valid JSON starting with { and ending with }."
         )

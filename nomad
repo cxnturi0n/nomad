@@ -5,7 +5,7 @@ nomad: Multi-agent source code security review — provider-agnostic.
 A0 ORCHESTRATOR
 ================
 This is NOT an LLM agent — it's a deterministic Python program that:
-  1. Parses CLI arguments
+  1. Parses nomadI arguments
   2. Creates the appropriate AI provider runner
   3. Runs agents in the correct order
   4. Passes context between agents
@@ -13,14 +13,14 @@ This is NOT an LLM agent — it's a deterministic Python program that:
   6. Tracks progress and handles errors
 
 Supported providers:
-  claude  — Claude Code CLI (agentic, full tool use)
+  nomad.pyaude  — Claude Code CLI (agentic, full tool use)
   openai  — OpenAI Codex CLI or API (agentic CLI / single-shot API)
   ollama  — Ollama local models (single-shot, file context injected)
 
 Usage:
-  python claude_review.py --repo ./target-app
-  python claude_review.py --repo ./target-app --provider ollama --model qwen2.5-coder:32b
-  python claude_review.py --repo ./target-app --provider openai --model o4-mini
+  python nomad.py --repo ./target-app
+  python nomad.py --repo ./target-app --provider ollama --model qwen2.5-coder:32b
+  python nomad.py --repo ./target-app --provider openai --model o4-mini
 """
 
 import argparse
@@ -165,6 +165,10 @@ Examples:
         "--skip", nargs="*", default=[],
         metavar="AGENT",
         help="Agents to skip: static, secrets, deps, triage, fingerprint, validation. Recon cannot be skipped.",
+    )
+    parser.add_argument(
+        "--fresh", action="store_true",
+        help="Ignore checkpoint and start fresh (deletes previous output)",
     )
 
     args = parser.parse_args()
@@ -326,6 +330,8 @@ class ScalingEngine:
 # ── Pipeline Runner ──────────────────────────────────────────────────────────
 
 class Pipeline:
+    CHECKPOINT_FILE = "checkpoint.json"
+
     def __init__(self, config: EngagementConfig, runner: BaseRunner):
         self.config = config
         self.runner = runner
@@ -340,6 +346,75 @@ class Pipeline:
         self.deps_findings: dict = {}
         self.triaged_findings: dict = {}
         self.fingerprint_data: dict = {}
+        # Checkpoint state
+        self.completed_phases: set[str] = set()
+        self._load_checkpoint()
+
+    def _checkpoint_path(self) -> Path:
+        return self.output_dir / self.CHECKPOINT_FILE
+
+    def _load_checkpoint(self) -> None:
+        """Load previous run state if checkpoint exists."""
+        cp = self._checkpoint_path()
+        if not cp.exists():
+            return
+
+        try:
+            data = json.loads(cp.read_text())
+            self.completed_phases = set(data.get("completed_phases", []))
+
+            if self.completed_phases:
+                logger.info(f"Checkpoint found: {', '.join(sorted(self.completed_phases))} already completed")
+
+                # Reload saved outputs
+                if "recon" in self.completed_phases:
+                    recon_file = self.output_dir / "recon" / "a1_recon_output.json"
+                    if recon_file.exists():
+                        self.recon_report = json.loads(recon_file.read_text())
+
+                if "static" in self.completed_phases:
+                    merged_file = self.output_dir / "analysis" / "findings_static_merged.json"
+                    if merged_file.exists():
+                        self.static_findings = json.loads(merged_file.read_text())
+
+                if "secrets" in self.completed_phases:
+                    secrets_file = self.output_dir / "secrets" / "a3_secrets_output.json"
+                    if secrets_file.exists():
+                        self.secrets_findings = json.loads(secrets_file.read_text())
+
+                if "deps" in self.completed_phases:
+                    deps_file = self.output_dir / "deps" / "a4_deps_output.json"
+                    if deps_file.exists():
+                        self.deps_findings = json.loads(deps_file.read_text())
+
+                if "triage" in self.completed_phases:
+                    triage_file = self.output_dir / "triage" / "a6_triage_output.json"
+                    if triage_file.exists():
+                        self.triaged_findings = json.loads(triage_file.read_text())
+
+                if "fingerprint" in self.completed_phases:
+                    fp_file = self.output_dir / "fingerprint" / "a_fp_fingerprint_output.json"
+                    if fp_file.exists():
+                        self.fingerprint_data = json.loads(fp_file.read_text())
+
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Could not load checkpoint: {e}. Starting fresh.")
+            self.completed_phases = set()
+
+    def _save_checkpoint(self, phase: str) -> None:
+        """Mark a phase as completed and save checkpoint."""
+        self.completed_phases.add(phase)
+        data = {
+            "completed_phases": sorted(self.completed_phases),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "repo": self.config.repo_path,
+        }
+        self._checkpoint_path().write_text(json.dumps(data, indent=2))
+        logger.debug(f"Checkpoint saved: {phase} completed")
+
+    def _phase_done(self, phase: str) -> bool:
+        """Check if a phase already completed in a previous run."""
+        return phase in self.completed_phases
 
     def run(self) -> bool:
         start = time.time()
@@ -347,24 +422,34 @@ class Pipeline:
 
         if self.config.skip_agents:
             logger.info(f"  Skipping:   {', '.join(self.config.skip_agents)}")
-            logger.info("")
+        if self.completed_phases:
+            logger.info(f"  Resuming:   {', '.join(sorted(self.completed_phases))} already done")
+        logger.info("")
 
         # ── Phase 1: Recon ───────────────────────────────────────────
         logger.info("=" * 60)
         logger.info("PHASE 1: RECONNAISSANCE")
         logger.info("=" * 60)
 
-        recon = ReconAgent(self.config, self.output_dir / "recon", self.runner)
-        run = recon.run()
-        self.runs.append(run)
+        if self._phase_done("recon"):
+            logger.info("Resumed from checkpoint — skipping")
+            if not self.recon_report:
+                logger.error("Checkpoint says recon done but no output found. Use --fresh.")
+                return False
+        else:
+            recon = ReconAgent(self.config, self.output_dir / "recon", self.runner)
+            run = recon.run()
+            self.runs.append(run)
 
-        if run.status != AgentStatus.COMPLETED:
-            logger.error(f"Recon failed: {run.error}")
-            logger.error("Cannot proceed without reconnaissance. Aborting.")
-            self._print_summary(time.time() - start)
-            return False
+            if run.status != AgentStatus.COMPLETED:
+                logger.error(f"Recon failed: {run.error}")
+                logger.error("Cannot proceed without reconnaissance. Aborting.")
+                self._print_summary(time.time() - start)
+                return False
 
-        self.recon_report = json.loads(recon.output_file.read_text())
+            self.recon_report = json.loads(recon.output_file.read_text())
+            self._save_checkpoint("recon")
+
         self._print_recon_summary()
 
         # Initialize scaling
@@ -386,6 +471,8 @@ class Pipeline:
 
         if not self._should_run("static"):
             logger.info("Skipped (--skip static)")
+        elif self._phase_done("static"):
+            logger.info("Resumed from checkpoint — skipping")
         else:
             static_findings = []
             for partition in partitions:
@@ -401,6 +488,7 @@ class Pipeline:
                 context = {
                     "recon_report": self.recon_report,
                     "partition": partition,
+                    "max_findings": 25 if len(partitions) <= 2 else 15,
                 }
                 run = a2.run(context=context)
                 self.runs.append(run)
@@ -426,6 +514,7 @@ class Pipeline:
                     f"(critical={by_sev.get('critical', 0)}, high={by_sev.get('high', 0)}, "
                     f"medium={by_sev.get('medium', 0)}, low={by_sev.get('low', 0)})"
                 )
+            self._save_checkpoint("static")
 
         # ── Phase 3: Secrets Scanning (A3) ────────────────────────
         logger.info("=" * 60)
@@ -434,6 +523,8 @@ class Pipeline:
 
         if not self._should_run("secrets"):
             logger.info("Skipped (--skip secrets)")
+        elif self._phase_done("secrets"):
+            logger.info("Resumed from checkpoint — skipping")
         else:
             a3 = SecretsAgent(
                 self.config,
@@ -462,6 +553,7 @@ class Pipeline:
                     logger.warning(f"Could not load secrets findings: {e}")
             else:
                 logger.warning(f"Secrets scan failed: {run_a3.error}")
+            self._save_checkpoint("secrets")
 
         # ── Phase 4: Dependency Audit (A4) ──────────────────────────
         logger.info("=" * 60)
@@ -470,6 +562,8 @@ class Pipeline:
 
         if not self._should_run("deps"):
             logger.info("Skipped (--skip deps)")
+        elif self._phase_done("deps"):
+            logger.info("Resumed from checkpoint — skipping")
         else:
             a4 = DependencyAuditAgent(
                 self.config,
@@ -505,6 +599,7 @@ class Pipeline:
                     logger.warning(f"Could not load dependency findings: {e}")
             else:
                 logger.warning(f"Dependency audit failed: {run_a4.error}")
+            self._save_checkpoint("deps")
 
         # ── Phase 5: Triage & Deduplication (A6) ─────────────────────
         logger.info("=" * 60)
@@ -513,6 +608,8 @@ class Pipeline:
 
         if not self._should_run("triage"):
             logger.info("Skipped (--skip triage)")
+        elif self._phase_done("triage"):
+            logger.info("Resumed from checkpoint — skipping")
         else:
             total_input = (
                 len(self.static_findings.get("findings", []))
@@ -555,16 +652,19 @@ class Pipeline:
                     logger.warning(f"Could not load triage results: {e}")
             else:
                 logger.warning(f"Triage failed: {run_a6.error}")
+            self._save_checkpoint("triage")
 
-        # ── Phase 6/7: Fingerprint + Validation — opt-in only ──────────
+        # ── Phase 6: Fingerprint + Validation — opt-in only ──────────
         if self.config.validate:
-            # ── Phase 6: Fingerprint ────────────────────────────────
+            # ── Phase 6a: Fingerprint ────────────────────────────────
             logger.info("=" * 60)
-            logger.info("PHASE 6: TARGET FINGERPRINTING")
+            logger.info("PHASE 6a: TARGET FINGERPRINTING")
             logger.info("=" * 60)
 
             if not self._should_run("fingerprint"):
                 logger.info("Skipped (--skip fingerprint)")
+            elif self._phase_done("fingerprint"):
+                logger.info("Resumed from checkpoint — skipping")
             else:
                 logger.info(f"Fingerprinting {self.config.base_url}...")
 
@@ -600,14 +700,17 @@ class Pipeline:
                         logger.warning(f"Could not load fingerprint data: {e}")
                 else:
                     logger.warning(f"Fingerprinting failed: {run_fp.error}")
+                self._save_checkpoint("fingerprint")
 
-            # ── Phase 7: Validation ─────────────────────────────────
+            # ── Phase 6b: Validation ─────────────────────────────────
             logger.info("=" * 60)
-            logger.info("PHASE 7: EXPLOIT VALIDATION")
+            logger.info("PHASE 6b: EXPLOIT VALIDATION")
             logger.info("=" * 60)
 
             if not self._should_run("validation"):
                 logger.info("Skipped (--skip validation)")
+            elif self._phase_done("validation"):
+                logger.info("Resumed from checkpoint — skipping")
             elif not self.triaged_findings.get("findings"):
                 logger.warning("No triaged findings to validate — skipping")
             else:
@@ -652,11 +755,12 @@ class Pipeline:
                         logger.warning(f"Could not load validation results: {e}")
                 else:
                     logger.warning(f"Validation failed: {run_a7.error}")
+                self._save_checkpoint("validation")
         else:
-            logger.info("Phase 7 (Fingerprint + Validation) skipped — use --validate to enable")
+            logger.info("Phase 6 (Fingerprint + Validation) skipped — use --validate to enable")
 
         logger.info("=" * 60)
-        logger.info("PHASE 8: REPORTING — not yet implemented")
+        logger.info("PHASE 7: REPORTING — not yet implemented")
         logger.info("=" * 60)
 
         self._print_summary(time.time() - start)
@@ -785,11 +889,22 @@ def _fmt_tech_stack(ts: dict) -> str:
 # ── Entry Point ──────────────────────────────────────────────────────────────
 
 def main():
+    # Pre-parse --fresh before full parse (need it before pipeline init)
+    import sys as _sys
+    fresh = "--fresh" in _sys.argv
+
     config = parse_args()
 
     # Logging
     log_file = Path(config.output_dir) / "nomad.log"
     setup_logging(config.verbose, log_file)
+
+    # Handle --fresh: clear checkpoint
+    if fresh:
+        cp = Path(config.output_dir) / Pipeline.CHECKPOINT_FILE
+        if cp.exists():
+            cp.unlink()
+            logger.info("Fresh run: checkpoint cleared")
 
     # Create runner for the chosen provider
     try:

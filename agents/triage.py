@@ -8,8 +8,8 @@ a single, clean, prioritized vulnerability list with:
   - CVSS 3.1 scores assigned
   - Findings sorted by priority
 
-This is a pure LLM agent — no CLI tools. The value is in reasoning about
-which findings overlap, which form chains, and how to score them.
+Supports batching: if total findings exceed BATCH_SIZE, splits into
+batches, triages each, then merges results.
 
 Inputs:  findings from A2, A3, A4 + recon_report
 Outputs: findings_triaged.json
@@ -17,27 +17,180 @@ Outputs: findings_triaged.json
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
 from agents.base import BaseAgent
-from models.schemas import EngagementConfig
+from models.schemas import EngagementConfig, AgentRun, AgentStatus
 from utils.runners.base import BaseRunner, RunResult
 
 logger = logging.getLogger("nomad.agents.triage")
 
 PROMPT_FILE = Path(__file__).parent / "prompts" / "triage.md"
 
+BATCH_SIZE = 40  # max findings per triage call
+
 
 class TriageAgent(BaseAgent):
     name = "a6_triage"
     description = "Triage & deduplication — merges, correlates, and CVSS-scores all findings"
-    tools = "read_only"  # may need to re-read source to verify
-    max_turns = 50
-    timeout = 6000
+    tools = "read_only"
+    max_turns = 30
+    timeout = 900  # 15 min
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner):
         super().__init__(config, output_dir, runner)
+
+    def run(self, context: Optional[dict] = None) -> AgentRun:
+        """Override to handle batching for large finding sets."""
+        if context is None:
+            context = {}
+
+        # Collect all findings
+        all_findings = []
+        for key in ("static_findings", "secrets_findings", "deps_findings"):
+            agent_data = context.get(key, {})
+            for f in agent_data.get("findings", []):
+                f["_source_agent"] = key.replace("_findings", "")
+                all_findings.append(f)
+
+        total = len(all_findings)
+        logger.info(f"[a6_triage] Total findings to triage: {total}")
+
+        if total <= BATCH_SIZE:
+            # Single pass — fits in one call
+            return super().run(context)
+
+        # Batching needed
+        logger.info(f"[a6_triage] Batching: {total} findings into {(total + BATCH_SIZE - 1) // BATCH_SIZE} batches of {BATCH_SIZE}")
+        return self._run_batched(context, all_findings)
+
+    def _run_batched(self, context: dict, all_findings: list) -> AgentRun:
+        """Run triage in batches, then merge."""
+        run = AgentRun(
+            agent_name=self.name,
+            status=AgentStatus.RUNNING,
+            output_file=str(self.output_file),
+        )
+        start = time.time()
+
+        batch_results = []
+        recon = context.get("recon_report", {})
+        severity_threshold = context.get("severity_threshold", "low")
+
+        # Split into batches
+        batches = [all_findings[i:i + BATCH_SIZE] for i in range(0, len(all_findings), BATCH_SIZE)]
+
+        for batch_idx, batch in enumerate(batches):
+            logger.info(f"[a6_triage] Processing batch {batch_idx + 1}/{len(batches)} ({len(batch)} findings)...")
+
+            # Build batch context
+            batch_context = {
+                "recon_report": recon,
+                "static_findings": {"findings": [f for f in batch if f.get("_source_agent") == "static"]},
+                "secrets_findings": {"findings": [f for f in batch if f.get("_source_agent") == "secrets"]},
+                "deps_findings": {"findings": [f for f in batch if f.get("_source_agent") == "deps"]},
+                "severity_threshold": severity_threshold,
+            }
+
+            system_prompt = self.get_system_prompt()
+            task_prompt = self.get_task_prompt(batch_context)
+
+            result = self.runner.run(
+                system_prompt=system_prompt,
+                task_prompt=task_prompt,
+                working_dir=self.config.repo_path,
+                tools=self.tools,
+                max_turns=self.max_turns,
+                timeout=self.timeout,
+                verbose=self.config.verbose,
+            )
+
+            if result.success and result.parsed_json:
+                parsed = self.parse_output(result)
+                if parsed:
+                    batch_results.append(parsed)
+                    logger.info(
+                        f"[a6_triage] Batch {batch_idx + 1}: "
+                        f"{len(parsed.get('findings', []))} findings, "
+                        f"{len(parsed.get('attack_chains', []))} chains"
+                    )
+                else:
+                    logger.warning(f"[a6_triage] Batch {batch_idx + 1} parse failed")
+            else:
+                logger.warning(f"[a6_triage] Batch {batch_idx + 1} failed: {result.error}")
+
+        run.duration_seconds = time.time() - start
+
+        if not batch_results:
+            run.status = AgentStatus.FAILED
+            run.error = "All triage batches failed"
+            return run
+
+        # Merge all batch results
+        merged = self._merge_batches(batch_results, len(all_findings))
+
+        # Save
+        self.output_file.write_text(json.dumps(merged, indent=2, default=str))
+        run.status = AgentStatus.COMPLETED
+        run.finding_count = len(merged.get("findings", []))
+
+        logger.info(
+            f"[a6_triage] Batched triage complete: {run.finding_count} findings from "
+            f"{len(batch_results)} batches in {run.duration_seconds:.1f}s"
+        )
+
+        return run
+
+    def _merge_batches(self, batch_results: list[dict], total_input: int) -> dict:
+        """Merge results from multiple triage batches."""
+        all_findings = []
+        all_chains = []
+        all_dedup = []
+        counter = 0
+
+        for batch in batch_results:
+            for f in batch.get("findings", []):
+                counter += 1
+                f["id"] = f"TRIAGE-{counter:03d}"
+                all_findings.append(f)
+            all_chains.extend(batch.get("attack_chains", []))
+            all_dedup.extend(batch.get("dedup_log", []))
+
+        # Re-sort: chains first, then CVSS descending
+        confidence_order = {"high": 0, "medium": 1, "low": 2}
+        all_findings.sort(key=lambda f: (
+            0 if f.get("attack_chain") else 1,
+            -f.get("cvss_score", 0),
+            confidence_order.get(f.get("confidence", "medium"), 1),
+        ))
+
+        # Re-number after sort
+        for i, f in enumerate(all_findings):
+            f["id"] = f"TRIAGE-{i + 1:03d}"
+
+        # Build summary
+        by_severity = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+        by_confidence = {"high": 0, "medium": 0, "low": 0}
+        for f in all_findings:
+            by_severity[f.get("severity", "medium")] = by_severity.get(f.get("severity", "medium"), 0) + 1
+            by_confidence[f.get("confidence", "medium")] = by_confidence.get(f.get("confidence", "medium"), 0) + 1
+
+        return {
+            "findings": all_findings,
+            "attack_chains": all_chains,
+            "dedup_log": all_dedup,
+            "summary": {
+                "total_input_findings": total_input,
+                "duplicates_removed": max(0, total_input - len(all_findings)),
+                "total_output_findings": len(all_findings),
+                "attack_chains_identified": len(all_chains),
+                "by_severity": by_severity,
+                "by_confidence": by_confidence,
+                "batches_used": len(batch_results),
+            },
+        }
 
     def get_system_prompt(self) -> str:
         return PROMPT_FILE.read_text()
@@ -57,12 +210,12 @@ class TriageAgent(BaseAgent):
         # Brief recon context
         sections.append(self._build_recon_summary(recon))
 
-        # Inject all upstream findings
-        sections.append(self._format_agent_findings(
+        # Inject all upstream findings — COMPACT format
+        sections.append(self._format_findings_compact(
             "A2 STATIC ANALYSIS FINDINGS", static_findings))
-        sections.append(self._format_agent_findings(
+        sections.append(self._format_findings_compact(
             "A3 SECRETS SCANNER FINDINGS", secrets_findings))
-        sections.append(self._format_agent_findings(
+        sections.append(self._format_findings_compact(
             "A4 DEPENDENCY AUDIT FINDINGS", deps_findings))
 
         # Count totals
@@ -75,12 +228,13 @@ class TriageAgent(BaseAgent):
         # Task
         sections.append(
             f"## YOUR TASK\n\n"
-            f"You have {total} total findings from 3 agents.\n\n"
+            f"You have {total} total findings from upstream agents.\n\n"
             f"1. Deduplicate: merge findings that describe the same underlying issue.\n"
             f"2. Identify attack chains: findings that combine for greater impact.\n"
             f"3. Assign CVSS 3.1 base scores with full vector strings to every finding.\n"
             f"4. Sort by priority: chains first, then CVSS descending.\n"
-            f"5. Filter out findings below severity threshold: {severity_threshold}.\n\n"
+            f"5. Filter out findings below severity threshold: {severity_threshold}.\n"
+            f"6. Output MAXIMUM 30 triaged findings.\n\n"
             f"Respond with ONLY the JSON object as specified in your instructions.\n"
             f"No markdown, no prose — just valid JSON starting with {{ and ending with }}."
         )
@@ -88,7 +242,6 @@ class TriageAgent(BaseAgent):
         return "\n\n".join(sections)
 
     def _build_recon_summary(self, recon: dict) -> str:
-        """Minimal recon context for triage decisions."""
         ts = recon.get("tech_stack", {})
         auth = recon.get("auth", {})
         stats = recon.get("repo_stats", {})
@@ -104,51 +257,40 @@ class TriageAgent(BaseAgent):
 
         return "\n".join(parts)
 
-    def _format_agent_findings(self, header: str, agent_output: dict) -> str:
-        """Format an agent's findings for prompt injection."""
+    def _format_findings_compact(self, header: str, agent_output: dict) -> str:
+        """
+        Format findings in COMPACT mode — one line per finding.
+        This dramatically reduces prompt size vs the full format.
+        """
         findings = agent_output.get("findings", [])
 
         if not findings:
             return f"## {header}\n\nNo findings."
 
-        lines = [f"## {header}\n\n{len(findings)} finding(s):\n"]
+        lines = [f"## {header} ({len(findings)} findings)\n"]
+        lines.append("Format: [ID] SEVERITY | CONFIDENCE | CWE | file:line | title | description_summary\n")
 
         for f in findings:
             fid = f.get("id", "?")
-            title = f.get("title", "Untitled")
-            severity = f.get("severity", "?")
-            confidence = f.get("confidence", "?")
-            file_loc = f.get("file", "")
+            sev = f.get("severity", "?").upper()[:4]
+            conf = f.get("confidence", "?")[0].upper()
+            cwe = f.get("cwe_id", "")
+            cwe_str = f"CWE-{cwe}" if cwe else "no-CWE"
+            file_loc = f.get("file", "?")
             line = f.get("line_start", f.get("line", ""))
-            desc = f.get("description", "")[:300]
-            attack = f.get("attack_scenario", "")[:200]
-            remediation = f.get("remediation", "")[:200]
+            title = f.get("title", "Untitled")[:80]
+            desc = f.get("description", "")[:120].replace("\n", " ")
 
-            # Include fields specific to different agent types
-            extras = []
-            if f.get("cwe_id"):
-                extras.append(f"CWE-{f['cwe_id']}")
-            if f.get("code_snippet"):
-                extras.append(f"Code: {f['code_snippet'][:100]}")
+            # Type-specific extras
+            extra = ""
             if f.get("package_name"):
-                extras.append(f"Package: {f['package_name']}@{f.get('package_version', '?')}")
-            if f.get("type"):
-                extras.append(f"Type: {f['type']}")
-            if f.get("detection_source"):
-                extras.append(f"Source: {f['detection_source']}")
-            if f.get("cve_ids"):
-                extras.append(f"CVEs: {', '.join(f['cve_ids'][:3])}")
-
-            extra_str = " | ".join(extras)
+                extra = f" | pkg={f['package_name']}@{f.get('package_version', '?')}"
+            elif f.get("type"):
+                extra = f" | type={f['type']}"
 
             lines.append(
-                f"### {fid}: {title}\n"
-                f"  Severity: {severity} | Confidence: {confidence} | "
-                f"File: {file_loc}:{line}\n"
-                f"  {extra_str}\n"
-                f"  Description: {desc}\n"
-                f"  Attack: {attack}\n"
-                f"  Remediation: {remediation}\n"
+                f"[{fid}] {sev} | {conf} | {cwe_str} | {file_loc}:{line} | "
+                f"{title} | {desc}{extra}"
             )
 
         return "\n".join(lines)
@@ -164,7 +306,6 @@ class TriageAgent(BaseAgent):
             logger.error(f"Expected dict, got {type(data).__name__}")
             return None
 
-        # Ensure required keys
         if "findings" not in data:
             for alt in ("triaged_findings", "results", "vulnerabilities"):
                 if alt in data and isinstance(data[alt], list):
@@ -193,7 +334,6 @@ class TriageAgent(BaseAgent):
         return data
 
     def _validate_findings(self, findings: list) -> list:
-        """Validate and normalize triaged findings."""
         valid = []
         seen_ids = set()
 
@@ -227,6 +367,9 @@ class TriageAgent(BaseAgent):
             if isinstance(cwe_id, str):
                 cwe_id = int(cwe_id.replace("CWE-", "").replace("cwe-", "")) if cwe_id.replace("CWE-", "").replace("cwe-", "").isdigit() else 0
 
+            # Clean _source_agent tag if present
+            f.pop("_source_agent", None)
+
             valid.append({
                 "id": fid,
                 "title": f.get("title", ""),
@@ -259,7 +402,6 @@ class TriageAgent(BaseAgent):
         return valid
 
     def _validate_chains(self, chains: list) -> list:
-        """Validate attack chain entries."""
         valid = []
         for i, c in enumerate(chains):
             if not isinstance(c, dict):
@@ -287,7 +429,6 @@ class TriageAgent(BaseAgent):
         return valid
 
     def _build_summary(self, data: dict) -> dict:
-        """Build consistent summary."""
         findings = data.get("findings", [])
         dedup_log = data.get("dedup_log", [])
         chains = data.get("attack_chains", [])
@@ -302,14 +443,11 @@ class TriageAgent(BaseAgent):
             by_severity[sev] = by_severity.get(sev, 0) + 1
             by_confidence[conf] = by_confidence.get(conf, 0) + 1
 
-        # Count total inputs from dedup log
         total_input = existing.get("total_input_findings", 0)
         if not total_input:
-            # Estimate from original_ids
             all_originals = set()
             for f in findings:
                 all_originals.update(f.get("original_ids", []))
-            # Plus findings without original_ids (not merged)
             unmerged = len([f for f in findings if not f.get("original_ids")])
             total_input = len(all_originals) + unmerged
 
