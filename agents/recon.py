@@ -38,8 +38,8 @@ class ReconAgent(BaseAgent):
     name = "a1_recon"
     description = "Codebase reconnaissance — maps architecture, entry points, data flows"
     tools = "read_only"
-    max_turns = 50
-    timeout = 1200
+    max_turns = 600
+    timeout = 6000
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner):
         super().__init__(config, output_dir, runner)

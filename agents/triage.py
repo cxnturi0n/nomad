@@ -36,8 +36,8 @@ class TriageAgent(BaseAgent):
     name = "a6_triage"
     description = "Triage & deduplication — merges, correlates, and CVSS-scores all findings"
     tools = "read_only"
-    max_turns = 30
-    timeout = 900  # 15 min
+    max_turns = 600
+    timeout = 6000  # 15 min
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner):
         super().__init__(config, output_dir, runner)

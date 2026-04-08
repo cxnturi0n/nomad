@@ -30,7 +30,7 @@ class StaticAnalysisAgent(BaseAgent):
     description = "Static source code analysis — hunts for security vulnerabilities"
     tools = "read_only"
     max_turns = 75  # may need many turns for thorough analysis
-    timeout = 900   # 15 min — deep analysis of large modules takes time
+    timeout = 6000   # 15 min — deep analysis of large modules takes time
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner,
                  scope_name: str = "full"):

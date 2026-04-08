@@ -39,8 +39,8 @@ class FingerprintAgent(BaseAgent):
     name = "a_fp_fingerprint"
     description = "Application fingerprinting — maps WAFs, server config, defenses, and attack surface"
     tools = "read_write"  # needs bash for curl
-    max_turns = 60
-    timeout = 600  # 10 min — many sequential curl calls
+    max_turns = 600
+    timeout = 6000  # 10 min — many sequential curl calls
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner):
         super().__init__(config, output_dir, runner)

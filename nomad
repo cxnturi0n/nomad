@@ -5,7 +5,7 @@ nomad: Multi-agent source code security review — provider-agnostic.
 A0 ORCHESTRATOR
 ================
 This is NOT an LLM agent — it's a deterministic Python program that:
-  1. Parses nomadI arguments
+  1. Parses CLI arguments
   2. Creates the appropriate AI provider runner
   3. Runs agents in the correct order
   4. Passes context between agents
@@ -13,7 +13,7 @@ This is NOT an LLM agent — it's a deterministic Python program that:
   6. Tracks progress and handles errors
 
 Supported providers:
-  nomad.pyaude  — Claude Code CLI (agentic, full tool use)
+  claude  — Claude Code CLI (agentic, full tool use)
   openai  — OpenAI Codex CLI or API (agentic CLI / single-shot API)
   ollama  — Ollama local models (single-shot, file context injected)
 
@@ -514,7 +514,9 @@ class Pipeline:
                     f"(critical={by_sev.get('critical', 0)}, high={by_sev.get('high', 0)}, "
                     f"medium={by_sev.get('medium', 0)}, low={by_sev.get('low', 0)})"
                 )
-            self._save_checkpoint("static")
+                self._save_checkpoint("static")
+            else:
+                logger.warning("No static findings produced — checkpoint NOT saved")
 
         # ── Phase 3: Secrets Scanning (A3) ────────────────────────
         logger.info("=" * 60)
@@ -549,11 +551,11 @@ class Pipeline:
                             )
                         elif not tool_info.get("available"):
                             logger.info(f"  {tool_name}: not installed (skipped)")
+                    self._save_checkpoint("secrets")
                 except (json.JSONDecodeError, FileNotFoundError) as e:
                     logger.warning(f"Could not load secrets findings: {e}")
             else:
                 logger.warning(f"Secrets scan failed: {run_a3.error}")
-            self._save_checkpoint("secrets")
 
         # ── Phase 4: Dependency Audit (A4) ──────────────────────────
         logger.info("=" * 60)
@@ -595,11 +597,11 @@ class Pipeline:
                             )
                         elif not tool_info.get("available"):
                             logger.info(f"  {tool_name}: not installed (skipped)")
+                    self._save_checkpoint("deps")
                 except (json.JSONDecodeError, FileNotFoundError) as e:
                     logger.warning(f"Could not load dependency findings: {e}")
             else:
                 logger.warning(f"Dependency audit failed: {run_a4.error}")
-            self._save_checkpoint("deps")
 
         # ── Phase 5: Triage & Deduplication (A6) ─────────────────────
         logger.info("=" * 60)
@@ -648,11 +650,11 @@ class Pipeline:
                         logger.info(f"  Attack chains identified: {len(chains)}")
                         for chain in chains:
                             logger.info(f"    → {chain.get('title', '?')}")
+                    self._save_checkpoint("triage")
                 except (json.JSONDecodeError, FileNotFoundError) as e:
                     logger.warning(f"Could not load triage results: {e}")
             else:
                 logger.warning(f"Triage failed: {run_a6.error}")
-            self._save_checkpoint("triage")
 
         # ── Phase 6: Fingerprint + Validation — opt-in only ──────────
         if self.config.validate:
@@ -696,11 +698,11 @@ class Pipeline:
                         logger.info(f"  Missing security headers: {len(missing)}")
                         eps = self.fingerprint_data.get("endpoints_discovered", [])
                         logger.info(f"  Live endpoints discovered: {len(eps)}")
+                        self._save_checkpoint("fingerprint")
                     except (json.JSONDecodeError, FileNotFoundError) as e:
                         logger.warning(f"Could not load fingerprint data: {e}")
                 else:
                     logger.warning(f"Fingerprinting failed: {run_fp.error}")
-                self._save_checkpoint("fingerprint")
 
             # ── Phase 6b: Validation ─────────────────────────────────
             logger.info("=" * 60)
@@ -751,11 +753,11 @@ class Pipeline:
                             if v.get("status") == "confirmed":
                                 bypass = f" [bypassed: {', '.join(v['defenses_bypassed'])}]" if v.get("defenses_bypassed") else ""
                                 logger.info(f"    ✓ CONFIRMED: {v.get('finding_id')} — {v.get('title')}{bypass}")
+                        self._save_checkpoint("validation")
                     except (json.JSONDecodeError, FileNotFoundError) as e:
                         logger.warning(f"Could not load validation results: {e}")
                 else:
                     logger.warning(f"Validation failed: {run_a7.error}")
-                self._save_checkpoint("validation")
         else:
             logger.info("Phase 6 (Fingerprint + Validation) skipped — use --validate to enable")
 

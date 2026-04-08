@@ -360,8 +360,8 @@ class DependencyAuditAgent(BaseAgent):
     name = "a4_deps"
     description = "Dependency auditing — identifies vulnerable and outdated third-party packages"
     tools = "read_only"
-    max_turns = 40
-    timeout = 600
+    max_turns = 200
+    timeout = 6000
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner):
         super().__init__(config, output_dir, runner)
