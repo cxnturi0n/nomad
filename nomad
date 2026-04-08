@@ -556,16 +556,11 @@ class Pipeline:
             else:
                 logger.warning(f"Triage failed: {run_a6.error}")
 
-        # ── Phase 6: Config Review (A5) ──────────────────────────────
-        logger.info("=" * 60)
-        logger.info("PHASE 6: ANALYSIS (A5 Config) — not yet implemented")
-        logger.info("=" * 60)
-
-        # ── Phase 7: Fingerprint + Validation — opt-in only ──────────
+        # ── Phase 6/7: Fingerprint + Validation — opt-in only ──────────
         if self.config.validate:
-            # ── Phase 7a: Fingerprint ────────────────────────────────
+            # ── Phase 6: Fingerprint ────────────────────────────────
             logger.info("=" * 60)
-            logger.info("PHASE 7a: TARGET FINGERPRINTING")
+            logger.info("PHASE 6: TARGET FINGERPRINTING")
             logger.info("=" * 60)
 
             if not self._should_run("fingerprint"):
@@ -606,9 +601,9 @@ class Pipeline:
                 else:
                     logger.warning(f"Fingerprinting failed: {run_fp.error}")
 
-            # ── Phase 7b: Validation ─────────────────────────────────
+            # ── Phase 7: Validation ─────────────────────────────────
             logger.info("=" * 60)
-            logger.info("PHASE 7b: EXPLOIT VALIDATION")
+            logger.info("PHASE 7: EXPLOIT VALIDATION")
             logger.info("=" * 60)
 
             if not self._should_run("validation"):

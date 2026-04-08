@@ -62,9 +62,8 @@ A0  Orchestrator (deterministic Python — not an LLM)
  ├─ A2  Static Analysis ....... ✅  Hunts vulnerabilities across 30+ CWE classes
  ├─ A3  Secrets Scanner ....... ✅  Hardcoded credentials, API keys, tokens (+ Semgrep, TruffleHog)
  ├─ A4  Dependency Audit ...... ✅  Vulnerable packages, supply chain risks (+ npm audit, pip-audit, osv-scanner)
- ├─ A5  Config Reviewer ....... ⬜  Planned
- ├─ A6  Triage & Dedup ........ ✅  Merges findings, identifies attack chains, assigns CVSS 3.1
- ├─ AFP Fingerprint ........... ✅  Probes running app: WAF detection, bypass hints, defense profiling
+ ├─ A5  Triage & Dedup ........ ✅  Merges findings, identifies attack chains, assigns CVSS 3.1
+ ├─ A6 Fingerprint ...........  ✅  Probes running app: WAF detection, bypass hints, defense profiling
  ├─ A7  Validation ............ ✅  Active exploit testing with adaptive WAF bypass
  └─ A8  Reporting ............. ⬜  Planned
 ```
