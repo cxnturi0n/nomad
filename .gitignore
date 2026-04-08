@@ -1,1 +1,14 @@
 output/
+
+__pycache__/
+*.pyc
+*.pyo
+
+.env
+.env.*
+
+.vscode/
+.idea/
+
+.DS_Store
+Thumbs.db
