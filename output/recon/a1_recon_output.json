@@ -1,0 +1,113 @@
+{
+  "tech_stack": {
+    "languages": [
+      "javascript"
+    ],
+    "frameworks": [
+      "express@4.18.2"
+    ],
+    "databases": [
+      "sqlite3@5.1.6 (in-memory SQLite)"
+    ],
+    "runtime": "node.js",
+    "package_manager": "npm",
+    "containerized": false,
+    "ci_cd": null,
+    "iac": []
+  },
+  "entry_points": [
+    {
+      "type": "http",
+      "method": "GET",
+      "path": "/login",
+      "handler": "anonymous arrow function",
+      "file": "app.js",
+      "line": 12,
+      "auth_required": false,
+      "description": "Login endpoint accepting username and password as GET query parameters; directly interpolates them into a raw SQL query string with no sanitization or parameterization"
+    }
+  ],
+  "auth": {
+    "mechanisms": [
+      "credential check via raw SQL query"
+    ],
+    "session_store": null,
+    "password_hashing": null,
+    "mfa_supported": false,
+    "authorization_model": "none",
+    "key_files": [
+      "app.js"
+    ],
+    "notes": "Passwords stored in plaintext in the in-memory SQLite database. Authentication performed by comparing raw plaintext username and password via a concatenated SQL string. No session, token, or cookie management. No logout mechanism."
+  },
+  "data_flows": [
+    {
+      "name": "Login credential check",
+      "input_source": "GET /login \u2014 req.query.username, req.query.password",
+      "validation": "None \u2014 no input validation, sanitization, or type checking performed",
+      "processing": "Username and password are directly interpolated into a raw SQL template literal string: SELECT * FROM users WHERE username = '${username}' AND password = '${password}'",
+      "storage": "In-memory SQLite database (users table with id, username, password columns); seeded with hardcoded admin:password123 credential",
+      "output": "HTTP text response: 'Login successful!' if a row is returned, 'Login failed' otherwise, 'Error' on DB error",
+      "sanitization_notes": "No sanitization of any kind. Query is built via ES6 template literal string concatenation. No use of parameterized queries or prepared statements. Raw query is also logged to stdout via console.log."
+    }
+  ],
+  "trust_boundaries": [
+    {
+      "boundary": "client_to_server",
+      "description": "HTTP client (browser or API caller) to Express application on port 3000",
+      "enforcement": "No CORS policy, no helmet headers, no rate limiting, no input validation, no authentication middleware. All query parameters accepted as-is."
+    }
+  ],
+  "critical_files": {
+    "auth": [
+      "app.js"
+    ],
+    "input_validation": [],
+    "database": [
+      "app.js"
+    ],
+    "crypto": [],
+    "file_handling": [],
+    "config": [
+      "package.json"
+    ],
+    "middleware": [],
+    "error_handling": [
+      "app.js"
+    ],
+    "external_apis": []
+  },
+  "modules": [
+    {
+      "name": "application",
+      "paths": [
+        "app.js"
+      ],
+      "loc_estimate": 34,
+      "risk": "critical",
+      "depends_on": [],
+      "description": "Entire application in a single file. Initializes Express server, creates in-memory SQLite DB with a users table, seeds one hardcoded admin user with plaintext password, and exposes a single GET /login route that constructs a raw SQL query from unsanitized query parameters."
+    }
+  ],
+  "third_party_integrations": [],
+  "repo_stats": {
+    "total_files": 3,
+    "total_loc": 34,
+    "language_breakdown": {
+      "javascript": 34,
+      "json": 10
+    }
+  },
+  "security_observations": [
+    "GET query parameters used to transmit credentials \u2014 username and password are visible in URL, server logs, browser history, and proxy logs",
+    "No parameterized queries or prepared statements: SQL query built via ES6 template literal string interpolation enabling classic SQL injection",
+    "Raw SQL query including user-supplied credentials is logged to stdout via console.log on every request",
+    "Passwords stored in plaintext in the database \u2014 no hashing algorithm applied",
+    "No input validation, length limits, or type checking on any user-supplied input",
+    "No authentication middleware or session management \u2014 no tokens, cookies, or session store",
+    "No rate limiting on the login endpoint \u2014 brute force attacks are unrestricted",
+    "No error differentiation \u2014 raw DB errors returned directly to the client",
+    "No security headers middleware (e.g., helmet) configured",
+    "Application listens on all interfaces (0.0.0.0) on port 3000 with no TLS/HTTPS"
+  ]
+}

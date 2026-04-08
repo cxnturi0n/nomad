@@ -1,0 +1,18 @@
+{
+  "strategy": "single_pass",
+  "partitions": [
+    {
+      "scope_name": "full_repo",
+      "paths": [
+        "."
+      ],
+      "risk": "high",
+      "context_files": [
+        "app.js",
+        "app.js",
+        "package.json",
+        "app.js"
+      ]
+    }
+  ]
+}

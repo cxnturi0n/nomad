@@ -1,0 +1,111 @@
+23:20:17 [INFO   ] nomad.orchestrator: Provider ready: Claude Code CLI found
+23:20:17 [INFO   ] nomad.orchestrator: 
+╔══════════════════════════════════════════════════════════════╗
+║                        N O M A D                            ║
+║          Multi-Agent Source Code Security Audit              ║
+╚══════════════════════════════════════════════════════════════╝
+23:20:17 [INFO   ] nomad.orchestrator:   Provider:   claude (claude (default))
+23:20:17 [INFO   ] nomad.orchestrator:   Target:     /home/centuri0n/sqli-example
+23:20:17 [INFO   ] nomad.orchestrator:   Scope:      full
+23:20:17 [INFO   ] nomad.orchestrator:   Validate:   False
+23:20:17 [INFO   ] nomad.orchestrator:   Output:     /home/centuri0n/nomad/output
+23:20:17 [INFO   ] nomad.orchestrator:   Threshold:  low+
+23:20:17 [INFO   ] nomad.orchestrator:   Started:    2026-04-07T21:20:17.308140+00:00
+23:20:17 [INFO   ] nomad.orchestrator: 
+23:20:17 [INFO   ] nomad.orchestrator: ============================================================
+23:20:17 [INFO   ] nomad.orchestrator: PHASE 1: RECONNAISSANCE
+23:20:17 [INFO   ] nomad.orchestrator: ============================================================
+23:20:17 [INFO   ] nomad.agents: [a1_recon] Starting (provider: claude (default))...
+23:20:17 [INFO   ] nomad.runner.claude: [claude] Running in /home/centuri0n/sqli-example
+23:20:17 [DEBUG  ] nomad.runner.claude: [claude] Tools: ['Read', 'Bash(read_only=true)']
+23:21:03 [INFO   ] nomad.agents.recon: Recon complete: 1 modules, 1 entry points, 1 data flows, 34 LOC
+23:21:03 [INFO   ] nomad.agents: [a1_recon] Completed in 46.0s (3 items, provider=claude)
+23:21:03 [INFO   ] nomad.agents: [a1_recon] Cost: $0.1093
+23:21:03 [INFO   ] nomad.orchestrator: ── Recon Results ──
+23:21:03 [INFO   ] nomad.orchestrator:   Tech stack:    express@4.18.2, javascript
+23:21:03 [INFO   ] nomad.orchestrator:   Modules:       1
+23:21:03 [INFO   ] nomad.orchestrator:   Entry points:  1
+23:21:03 [INFO   ] nomad.orchestrator:   Data flows:    1
+23:21:03 [INFO   ] nomad.orchestrator:   Auth:          credential check via raw SQL query
+23:21:03 [INFO   ] nomad.orchestrator:   Total LOC:     34
+23:21:03 [INFO   ] nomad.orchestrator:   Observations:  10
+23:21:03 [INFO   ] nomad.orchestrator:     • GET query parameters used to transmit credentials — username and password are visible in URL, server logs, browser histo
+23:21:03 [INFO   ] nomad.orchestrator:     • No parameterized queries or prepared statements: SQL query built via ES6 template literal string interpolation enabling 
+23:21:03 [INFO   ] nomad.orchestrator:     • Raw SQL query including user-supplied credentials is logged to stdout via console.log on every request
+23:21:03 [INFO   ] nomad.orchestrator: 
+23:21:03 [INFO   ] nomad.orchestrator: Scaling strategy: single_pass (1 partition(s))
+23:21:03 [INFO   ] nomad.orchestrator:   → [HIGH    ] full_repo: ['.']
+23:21:03 [INFO   ] nomad.orchestrator: ============================================================
+23:21:03 [INFO   ] nomad.orchestrator: PHASE 2: STATIC ANALYSIS
+23:21:03 [INFO   ] nomad.orchestrator: ============================================================
+23:21:03 [INFO   ] nomad.orchestrator: Running static analysis on: full_repo
+23:21:03 [INFO   ] nomad.agents: [a2_static_full_repo] Starting (provider: claude (default))...
+23:21:03 [INFO   ] nomad.runner.claude: [claude] Running in /home/centuri0n/sqli-example
+23:21:03 [DEBUG  ] nomad.runner.claude: [claude] Tools: ['Read', 'Bash(read_only=true)']
+23:22:12 [INFO   ] nomad.agents.static_analysis: Static analysis complete: 7 findings (critical=1, high=3, medium=2, low=1)
+23:22:12 [INFO   ] nomad.agents: [a2_static_full_repo] Completed in 69.7s (7 items, provider=claude)
+23:22:12 [INFO   ] nomad.agents: [a2_static_full_repo] Cost: $0.0934
+23:22:12 [INFO   ] nomad.orchestrator: Static analysis complete: 7 total findings (critical=1, high=3, medium=2, low=1)
+23:22:12 [INFO   ] nomad.orchestrator: ============================================================
+23:22:12 [INFO   ] nomad.orchestrator: PHASE 3: SECRETS SCANNING
+23:22:12 [INFO   ] nomad.orchestrator: ============================================================
+23:22:12 [INFO   ] nomad.agents.secrets: [a3_secrets] Running pre-scan tools...
+23:22:15 [INFO   ] nomad.agents.secrets: [trufflehog] Found 0 raw findings
+23:22:15 [DEBUG  ] nomad.agents.secrets: [trufflehog] stderr: {"level":"info-0","ts":"2026-04-07T23:22:14+02:00","logger":"trufflehog","msg":"--directory flag is deprecated, please pass directories as arguments"}
+{"level":"info-0","ts":"2026-04-07T23:22:14+02:00","logger":"trufflehog","msg":"running source","source_manager_worker_id":"ztDlK","with_units":true}
+{"level":"error","ts":"2026-04-07T23:22:15+02:00","logger":"trufflehog","msg":"encountered errors during scan","job":1,"source_name":"trufflehog - filesystem","errors":["lstat false: no such file or 
+23:22:22 [INFO   ] nomad.agents.secrets: [semgrep] Found 1 raw findings
+23:22:22 [INFO   ] nomad.agents.secrets: [a3_secrets] Tools completed: trufflehog (0 raw), semgrep (1 raw)
+23:22:22 [INFO   ] nomad.agents: [a3_secrets] Starting (provider: claude (default))...
+23:22:22 [INFO   ] nomad.runner.claude: [claude] Running in /home/centuri0n/sqli-example
+23:22:22 [DEBUG  ] nomad.runner.claude: [claude] Tools: ['Read', 'Bash(read_only=true)']
+23:23:26 [INFO   ] nomad.agents.secrets: Secrets scan complete: 4 findings (critical=2, high=2, medium=0, low=0)
+23:23:26 [INFO   ] nomad.agents: [a3_secrets] Completed in 63.4s (4 items, provider=claude)
+23:23:26 [INFO   ] nomad.agents: [a3_secrets] Cost: $0.0812
+23:23:26 [INFO   ] nomad.orchestrator:   trufflehog: 0 raw → 0 confirmed, 0 false positives
+23:23:26 [INFO   ] nomad.orchestrator:   semgrep: 1 raw → 0 confirmed, 0 false positives
+23:23:26 [INFO   ] nomad.orchestrator: ============================================================
+23:23:26 [INFO   ] nomad.orchestrator: PHASE 4: DEPENDENCY AUDIT
+23:23:26 [INFO   ] nomad.orchestrator: ============================================================
+23:23:26 [INFO   ] nomad.agents.deps: [a4_deps] Detected ecosystems: ['npm']
+23:23:26 [INFO   ] nomad.agents.deps: [a4_deps] Running dependency audit tools...
+23:23:27 [INFO   ] nomad.agents.deps: [npm_audit] Found 7 vulnerabilities
+23:23:27 [INFO   ] nomad.agents.deps: [a4_deps] Tools completed: npm_audit (7 raw)
+23:23:27 [INFO   ] nomad.agents: [a4_deps] Starting (provider: claude (default))...
+23:23:27 [INFO   ] nomad.runner.claude: [claude] Running in /home/centuri0n/sqli-example
+23:23:27 [DEBUG  ] nomad.runner.claude: [claude] Tools: ['Read', 'Bash(read_only=true)']
+23:29:58 [INFO   ] nomad.agents.deps: Dependency audit complete: 10 findings (critical=1, high=5, medium=0, low=2)
+23:29:58 [INFO   ] nomad.agents: [a4_deps] Completed in 391.4s (10 items, provider=claude)
+23:29:58 [INFO   ] nomad.agents: [a4_deps] Cost: $0.5924
+23:29:58 [INFO   ] nomad.orchestrator:   Ecosystem: ? | Direct: ? | Transitive: ? | Lockfile: True
+23:29:58 [INFO   ] nomad.orchestrator:   npm_audit: 7 raw → 7 confirmed
+23:29:58 [INFO   ] nomad.orchestrator: ============================================================
+23:29:58 [INFO   ] nomad.orchestrator: PHASE 5: TRIAGE & DEDUPLICATION
+23:29:58 [INFO   ] nomad.orchestrator: ============================================================
+23:29:58 [INFO   ] nomad.orchestrator: Triaging 21 total findings from A2+A3+A4...
+23:29:58 [INFO   ] nomad.agents: [a6_triage] Starting (provider: claude (default))...
+23:29:58 [INFO   ] nomad.runner.claude: [claude] Running in /home/centuri0n/sqli-example
+23:29:58 [DEBUG  ] nomad.runner.claude: [claude] Tools: ['Read', 'Bash(read_only=true)']
+23:39:58 [ERROR  ] nomad.agents: [a6_triage] Failed: Timed out after 600s
+23:39:58 [WARNING] nomad.orchestrator: Triage failed: Timed out after 600s
+23:39:58 [INFO   ] nomad.orchestrator: ============================================================
+23:39:58 [INFO   ] nomad.orchestrator: PHASE 6: ANALYSIS (A5 Config) — not yet implemented
+23:39:58 [INFO   ] nomad.orchestrator: ============================================================
+23:39:58 [INFO   ] nomad.orchestrator: Phase 7 (Validation) skipped — use --validate to enable
+23:39:58 [INFO   ] nomad.orchestrator: ============================================================
+23:39:58 [INFO   ] nomad.orchestrator: PHASE 8: REPORTING — not yet implemented
+23:39:58 [INFO   ] nomad.orchestrator: ============================================================
+23:39:58 [INFO   ] nomad.orchestrator: 
+23:39:58 [INFO   ] nomad.orchestrator: ============================================================
+23:39:58 [INFO   ] nomad.orchestrator: PIPELINE SUMMARY
+23:39:58 [INFO   ] nomad.orchestrator: ============================================================
+23:39:58 [INFO   ] nomad.orchestrator:   ✓ a1_recon              completed     46.0s  3 items
+23:39:58 [INFO   ] nomad.orchestrator:   ✓ a2_static_full_repo   completed     69.7s  7 items
+23:39:58 [INFO   ] nomad.orchestrator:   ✓ a3_secrets            completed     63.4s  4 items
+23:39:58 [INFO   ] nomad.orchestrator:   ✓ a4_deps               completed    391.4s  10 items
+23:39:58 [INFO   ] nomad.orchestrator:   ✗ a6_triage             failed       600.1s  0 items  ERROR: Timed out after 600s
+23:39:58 [INFO   ] nomad.orchestrator: 
+  Provider:      claude (claude (default))
+23:39:58 [INFO   ] nomad.orchestrator:   Total elapsed: 1181.6s
+23:39:58 [INFO   ] nomad.orchestrator:   Output dir:    /home/centuri0n/nomad/output
+23:39:58 [INFO   ] nomad.orchestrator: ============================================================

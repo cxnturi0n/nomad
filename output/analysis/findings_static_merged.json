@@ -1,0 +1,151 @@
+{
+  "findings": [
+    {
+      "id": "VULN-001",
+      "title": "SQL Injection in /login endpoint via template literal string interpolation",
+      "cwe_id": 89,
+      "cwe_name": "Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')",
+      "severity": "critical",
+      "confidence": "high",
+      "file": "app.js",
+      "line_start": 16,
+      "line_end": 16,
+      "code_snippet": "const query = `SELECT * FROM users WHERE username = '${username}' AND password = '${password}'`;",
+      "description": "req.query.username and req.query.password (lines 13\u201314) are directly interpolated into a raw SQL query string using an ES6 template literal on line 16. The constructed string is passed verbatim to db.get() on line 20 with no parameterization, prepared statements, or any sanitization. An attacker has full control over both interpolated positions in the WHERE clause.",
+      "attack_scenario": "An attacker sends GET /login?username=admin'--&password=anything. The resulting query becomes: SELECT * FROM users WHERE username = 'admin'--' AND password = 'anything'. The double-dash comments out the password check entirely, granting access as admin with no valid password. Alternatively, username=' OR '1'='1'-- returns the first row unconditionally, bypassing authentication for any account.",
+      "remediation": "Replace template literal interpolation with SQLite3 parameterized query placeholders:\n\nconst query = 'SELECT * FROM users WHERE username = ? AND password = ?';\ndb.get(query, [username, password], (err, row) => { ... });",
+      "references": [
+        "https://cwe.mitre.org/data/definitions/89.html"
+      ]
+    },
+    {
+      "id": "VULN-002",
+      "title": "Plaintext password storage \u2014 passwords stored without hashing",
+      "cwe_id": 916,
+      "cwe_name": "Use of Password Hash With Insufficient Computational Effort",
+      "severity": "high",
+      "confidence": "high",
+      "file": "app.js",
+      "line_start": 8,
+      "line_end": 9,
+      "code_snippet": "db.run(\"CREATE TABLE users (id INTEGER, username TEXT, password TEXT)\");\ndb.run(\"INSERT INTO users VALUES (1, 'admin', 'password123')\");",
+      "description": "The users table schema (line 8) stores passwords as plain TEXT with no hashing. The seed INSERT on line 9 stores the literal string 'password123'. The authentication query on line 16 performs a direct plaintext comparison via SQL equality. There is no use of bcrypt, scrypt, argon2, or any hashing algorithm anywhere in the codebase.",
+      "attack_scenario": "If an attacker achieves SQL injection (see VULN-001) and dumps the users table via UNION SELECT or similar, all passwords are immediately usable with no cracking required. Additionally, anyone with read access to a database backup or log file obtains credentials in cleartext.",
+      "remediation": "Hash passwords at storage time and compare hashes at login time using a slow, salted algorithm:\n\n// Storage: const bcrypt = require('bcrypt'); const hash = await bcrypt.hash(password, 12);\n// Comparison: const match = await bcrypt.compare(req.query.password, row.password);",
+      "references": [
+        "https://cwe.mitre.org/data/definitions/916.html"
+      ]
+    },
+    {
+      "id": "VULN-003",
+      "title": "Hardcoded credentials seeded directly into the database",
+      "cwe_id": 798,
+      "cwe_name": "Use of Hard-coded Credentials",
+      "severity": "high",
+      "confidence": "high",
+      "file": "app.js",
+      "line_start": 9,
+      "line_end": 9,
+      "code_snippet": "db.run(\"INSERT INTO users VALUES (1, 'admin', 'password123')\");",
+      "description": "A privileged account with username 'admin' and password 'password123' is hardcoded directly in source code on line 9. Anyone with access to the repository immediately knows a valid credential. This credential is also a trivially guessable default that will not be changed between deployments because it is baked into the startup code.",
+      "attack_scenario": "An attacker with access to the repository (or who simply guesses the default) sends GET /login?username=admin&password=password123 and receives 'Login successful!' with no additional barrier. Because there is no rate limiting (see VULN-006), this also succeeds trivially via an automated credential-stuffing request.",
+      "remediation": "Remove hardcoded credentials from source entirely. Seed accounts via a secure bootstrapping script that reads initial credentials from environment variables or a secrets manager, and stores only a bcrypt hash:\n\nconst initialPassword = process.env.ADMIN_INITIAL_PASSWORD;\nconst hash = await bcrypt.hash(initialPassword, 12);\ndb.run('INSERT INTO users VALUES (1, ?, ?)', ['admin', hash]);",
+      "references": [
+        "https://cwe.mitre.org/data/definitions/798.html"
+      ]
+    },
+    {
+      "id": "VULN-004",
+      "title": "Credentials transmitted in plaintext via GET query parameters",
+      "cwe_id": 598,
+      "cwe_name": "Use of GET Request Method With Sensitive Query Strings",
+      "severity": "high",
+      "confidence": "high",
+      "file": "app.js",
+      "line_start": 12,
+      "line_end": 14,
+      "code_snippet": "app.get('/login', (req, res) => {\n  const username = req.query.username;\n  const password = req.query.password;",
+      "description": "The /login route is defined as a GET request on line 12, causing username and password to be supplied as URL query parameters (e.g., /login?username=admin&password=password123). GET query parameters are recorded in: browser history, browser address bar, server access logs, reverse proxy logs, CDN logs, and HTTP Referer headers if the page links elsewhere. The application also runs without TLS (line 32: app.listen(3000)), so credentials are additionally exposed in plaintext on the network.",
+      "attack_scenario": "A server-side access log entry like '127.0.0.1 - - [07/Apr/2026] \"GET /login?username=admin&password=password123 HTTP/1.1\" 200' persists the credential in plaintext on disk, readable by any process with log access. An on-path observer (same network, ISP, or proxy) captures the credential from unencrypted HTTP traffic.",
+      "remediation": "Change the login endpoint to POST and read credentials from the request body over HTTPS:\n\napp.post('/login', express.json(), (req, res) => {\n  const { username, password } = req.body;\n  ...\n});\n\nAdditionally terminate TLS at the application or a reverse proxy layer.",
+      "references": [
+        "https://cwe.mitre.org/data/definitions/598.html"
+      ]
+    },
+    {
+      "id": "VULN-005",
+      "title": "Plaintext credentials logged to stdout on every login request",
+      "cwe_id": 532,
+      "cwe_name": "Insertion of Sensitive Information into Log File",
+      "severity": "medium",
+      "confidence": "high",
+      "file": "app.js",
+      "line_start": 18,
+      "line_end": 18,
+      "code_snippet": "console.log(\"Running query:\", query);",
+      "description": "The fully constructed SQL query string \u2014 which embeds the plaintext username and password supplied by the user \u2014 is written to stdout via console.log on every login attempt. In production environments stdout is typically captured to a log aggregation system (journald, CloudWatch, Splunk, ELK). This means every credential ever submitted, including valid ones, is permanently recorded in logs that are typically accessible to a broader set of operators than the authentication store itself.",
+      "attack_scenario": "An attacker who gains read access to application logs (a common lateral movement step after initial compromise) obtains a complete history of every username and password submitted to the login form, including successful ones, without needing to touch the database.",
+      "remediation": "Remove credential data from log output entirely. Log only a non-sensitive identifier such as the username (never the password) and omit it from the SQL string representation:\n\nconsole.log('Login attempt for user:', username);\n// Never log the query string when it contains user-supplied credentials.",
+      "references": [
+        "https://cwe.mitre.org/data/definitions/532.html"
+      ]
+    },
+    {
+      "id": "VULN-006",
+      "title": "No rate limiting on /login endpoint enables unrestricted brute force",
+      "cwe_id": 770,
+      "cwe_name": "Allocation of Resources Without Limits or Throttling",
+      "severity": "medium",
+      "confidence": "high",
+      "file": "app.js",
+      "line_start": 12,
+      "line_end": 30,
+      "code_snippet": "app.get('/login', (req, res) => {\n  const username = req.query.username;\n  const password = req.query.password;\n  ...\n});",
+      "description": "The /login route handler has no rate limiting, account lockout, CAPTCHA, or any other throttling mechanism. There is no use of express-rate-limit or equivalent middleware anywhere in the file. An attacker can make unlimited authentication attempts per second constrained only by network bandwidth and server throughput.",
+      "attack_scenario": "An attacker runs: for i in $(seq 1 100000); do curl -s \"http://target:3000/login?username=admin&password=$(shuf -n1 wordlist.txt)\"; done. With a common password list (rockyou.txt, 14 million entries) and an unthrottled endpoint, the hardcoded 'password123' credential (see VULN-003) would be discovered within seconds.",
+      "remediation": "Add request rate limiting using express-rate-limit:\n\nconst rateLimit = require('express-rate-limit');\nconst loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, message: 'Too many login attempts' });\napp.get('/login', loginLimiter, (req, res) => { ... });",
+      "references": [
+        "https://cwe.mitre.org/data/definitions/770.html"
+      ]
+    },
+    {
+      "id": "VULN-007",
+      "title": "No HTTP security headers configured on the Express application",
+      "cwe_id": 693,
+      "cwe_name": "Protection Mechanism Failure",
+      "severity": "low",
+      "confidence": "high",
+      "file": "app.js",
+      "line_start": 1,
+      "line_end": 34,
+      "code_snippet": "const express = require('express');\nconst sqlite3 = require('sqlite3').verbose();\n\nconst app = express();",
+      "description": "The application does not configure any HTTP security response headers. Express by default emits X-Powered-By: Express (fingerprinting) and omits Content-Security-Policy, X-Frame-Options, X-Content-Type-Options, Strict-Transport-Security, and Referrer-Policy. No call to app.use(helmet()) or equivalent manual header-setting is present anywhere in app.js or package.json dependencies.",
+      "attack_scenario": "The X-Powered-By header discloses the framework and version to attackers performing reconnaissance. Absence of X-Frame-Options allows the login page to be embedded in an attacker-controlled iframe for clickjacking credential harvesting. Absence of HSTS means browsers will not enforce HTTPS on repeat visits even if TLS is later added.",
+      "remediation": "Add helmet middleware as the first middleware registered:\n\nconst helmet = require('helmet');\napp.use(helmet());\n\nThis sets Content-Security-Policy, X-Frame-Options: SAMEORIGIN, X-Content-Type-Options: nosniff, Strict-Transport-Security, and removes X-Powered-By in a single call.",
+      "references": [
+        "https://cwe.mitre.org/data/definitions/693.html",
+        "https://helmetjs.github.io/"
+      ]
+    }
+  ],
+  "summary": {
+    "total_findings": 7,
+    "by_severity": {
+      "critical": 1,
+      "high": 3,
+      "medium": 2,
+      "low": 1,
+      "info": 0
+    },
+    "by_confidence": {
+      "high": 7,
+      "medium": 0,
+      "low": 0
+    },
+    "files_analyzed": [
+      "app.js",
+      "package.json"
+    ],
+    "scope_notes": "Merged from 1 partition(s)"
+  }
+}
