@@ -15,6 +15,24 @@ from utils.runners.base import BaseRunner, RunResult
 
 logger = logging.getLogger("nomad.agents")
 
+# Caveman mode directive — from JuliusBrussee/caveman plugin (rules/caveman-activate.md)
+# Injected into agent system prompts when --caveman flag is set.
+CAVEMAN_DIRECTIVE = """
+
+# CAVEMAN MODE ACTIVE — level: full
+
+Respond terse like smart caveman. All technical substance stay. Only fluff die.
+
+Rules:
+- Drop: articles (a/an/the), filler (just/really/basically), pleasantries, hedging
+- Fragments OK. Short synonyms. Technical terms exact. Code unchanged.
+- Pattern: [thing] [action] [reason]. [next step].
+- JSON output and structured data unchanged — only compress prose/narrative.
+
+Auto-Clarity: drop caveman for security warnings, irreversible actions, user confused. Resume after.
+Boundaries: code/commits/PRs written normal.
+"""
+
 
 class BaseAgent(ABC):
     """
@@ -71,6 +89,8 @@ class BaseAgent(ABC):
 
         try:
             system_prompt = self.get_system_prompt()
+            if self.config.caveman:
+                system_prompt += CAVEMAN_DIRECTIVE
             task_prompt = self.get_task_prompt(context)
 
             result = self.runner.run(

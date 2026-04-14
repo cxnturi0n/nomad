@@ -102,6 +102,7 @@ A1 feeds every downstream agent. A2/A3/A4 run independently and produce findings
 | `--tester` | Tester name for report | — |
 | `--engagement-id` | Engagement ID for report | — |
 | `-v, --verbose` | Show agent reasoning | off |
+| `--caveman` | Terse agent output via [caveman plugin](https://github.com/JuliusBrussee/caveman) — reduces token usage ~75% | off |
 
 ## Provider Comparison
 

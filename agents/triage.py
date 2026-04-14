@@ -95,6 +95,9 @@ class TriageAgent(BaseAgent):
             }
 
             system_prompt = self.get_system_prompt()
+            if self.config.caveman:
+                from agents.base import CAVEMAN_DIRECTIVE
+                system_prompt += CAVEMAN_DIRECTIVE
             task_prompt = self.get_task_prompt(batch_context)
 
             result = self.runner.run(

@@ -133,6 +133,7 @@ class EngagementConfig:
     verbose: bool = False
     skip_agents: list[str] = field(default_factory=list)
     ollama_host: str = ""          # Ollama server URL (default: http://localhost:11434)
+    caveman: bool = False          # Terse caveman-style output (reduces token usage ~75%)
 
 
 # ── Agent Run Tracking (A0 internal) ────────────────────────────────────────

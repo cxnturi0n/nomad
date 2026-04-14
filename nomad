@@ -170,6 +170,10 @@ Examples:
         "--fresh", action="store_true",
         help="Ignore checkpoint and start fresh (deletes previous output)",
     )
+    parser.add_argument(
+        "--caveman", action="store_true",
+        help="Enable caveman mode: terse agent output, reduces token usage ~75%% (Claude Code plugin)",
+    )
 
     args = parser.parse_args()
 
@@ -209,6 +213,7 @@ Examples:
         verbose=args.verbose,
         ollama_host=args.ollama_host,
         skip_agents=args.skip,
+        caveman=args.caveman,
     )
 
 
@@ -826,6 +831,8 @@ class Pipeline:
             logger.info(f"  Tester:     {self.config.tester_name}")
         if self.config.engagement_id:
             logger.info(f"  Engagement: {self.config.engagement_id}")
+        if self.config.caveman:
+            logger.info("  Caveman:    enabled (terse output, ~75% token savings)")
         logger.info("")
 
     def _print_recon_summary(self) -> None:
