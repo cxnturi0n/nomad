@@ -59,8 +59,8 @@ python3 nomad --repo /path/to/target-app --skip secrets deps triage fingerprint 
 A0  Orchestrator (deterministic Python — not an LLM)
  │
  ├─ A1  Recon ................. ✅  Maps codebase architecture, entry points, data flows
- ├─ A2  Static Analysis ....... ✅  Hunts vulnerabilities across 30+ CWE classes
- ├─ A3  Secrets Scanner ....... ✅  Hardcoded credentials, API keys, tokens (+ Semgrep, TruffleHog)
+ ├─ A2  Static Analysis ....... ✅  Hunts vulnerabilities across 30+ CWE classes (+ Semgrep SAST)
+ ├─ A3  Secrets Scanner ....... ✅  Hardcoded credentials, API keys, tokens (+ Semgrep secrets, TruffleHog)
  ├─ A4  Dependency Audit ...... ✅  Vulnerable packages, supply chain risks (+ npm audit, pip-audit, osv-scanner)
  ├─ A5  Triage & Dedup ........ ✅  Merges findings, identifies attack chains, assigns CVSS 3.1
  ├─ A6 Fingerprint ...........  ✅  Probes running app: WAF detection, bypass hints, defense profiling
@@ -89,6 +89,7 @@ A1 feeds every downstream agent. A2/A3/A4 run independently and produce findings
 | `--model` | Strong model override | auto per provider |
 | `--model-light` | Cheaper model (same provider) for low-stakes agents; enables tiered execution | — (single model) |
 | `--light-agents` | Override which agents use `--model-light` | secrets, deps, fingerprint |
+| `--effort` | Reasoning effort (Claude only): `low`/`medium`/`high`/`max`; applied to both tiers | provider default |
 | `--api-key` | API key override | env var |
 | `--ollama-host` | Ollama server URL | `localhost:11434` |
 | `--scope` | `full`, `quick`, `secrets_only`, `deps_only` | `full` |
@@ -118,6 +119,8 @@ A1 feeds every downstream agent. A2/A3/A4 run independently and produce findings
 
 Agentic providers (Claude, OpenAI) iteratively explore the codebase — read a file, decide what to read next, run commands. Ollama runs in single-shot mode where Nomad pre-reads source files and injects them into the prompt context.
 
+**`--validate` requires an agentic provider.** The fingerprint and validation agents must execute live HTTP requests (`curl`), so on single-shot providers (Ollama, or OpenAI API-fallback mode) they are **skipped** rather than fabricating untested results. Recon also degrades on single-shot providers (no live file browsing) and logs a warning.
+
 ## Model Tiering (token optimization)
 
 By default every agent uses one model (`--model`). To cut token cost, route the
@@ -125,10 +128,12 @@ reasoning-light agents to a cheaper model and reserve the strong model for the
 agents that actually need deep reasoning.
 
 ```bash
-# Claude: deep reasoning on Opus, bulk validation of tool output on Haiku
+# Opus 4.8 for the hard agents (recon, static, triage, validation),
+# Sonnet 4.6 for the rest (secrets, deps, fingerprint), high reasoning on both
 python3 nomad --repo /path/to/app \
   --model claude-opus-4-8 \
-  --model-light claude-haiku-4-5
+  --model-light claude-sonnet-4-6 \
+  --effort high
 ```
 
 - **Strong (default):** `recon`, `static`, `triage`, `validation` — map building, vulnerability hunting, correlation/CVSS, exploit crafting.
@@ -210,11 +215,21 @@ nomad                          ← A0 Orchestrator + CLI entry point
 
 **Agents never know which AI runs them.** They define a system prompt and task prompt, call `self.runner.run(...)`, and get back a `RunResult`. Swapping providers is a CLI flag.
 
-**Hybrid tool + LLM approach.** A3 and A4 run CLI security tools (Semgrep, TruffleHog, npm audit) first, then feed raw results to the LLM for validation, deduplication, and enrichment. Tools catch known patterns fast; the LLM catches what they miss and reduces false positives.
+**Hybrid tool + LLM approach.** A2, A3, and A4 run CLI security tools first, then feed raw results to the LLM for validation, deduplication, and enrichment. A2 gets Semgrep SAST (SQLi/XSS/command-injection/OWASP), A3 gets Semgrep secret rules + TruffleHog, A4 gets npm/pip/osv audit. Semgrep SAST runs once per repo and is cached across analysis partitions. Tools catch known patterns fast; the LLM confirms, removes false positives, and finds what they miss.
 
 **Fingerprint-informed exploitation.** AFP probes the target's defenses before A7 runs. A7 receives WAF vendor, bypass hints, and input vector analysis — so it picks the right payload technique on the first attempt instead of wasting rounds re-discovering what's blocked.
 
 **Scaling is partition-based.** For large repos, the orchestrator splits work by module and/or vulnerability class based on A1's LOC estimates: under 5K LOC = single pass, under 50K = split by module, over 50K = module × vulnerability class matrix.
+
+## Security
+
+Nomad runs AI agents that read **untrusted target source code** and execute shell commands in the repo. Treat every engagement as potentially hostile input:
+
+- **Sandbox untrusted targets.** Run Nomad in a network-isolated container/VM when scanning code you don't trust — a malicious repo can attempt prompt-injection to make an agent run commands.
+- **Network deny-list (Claude).** Read-only agents (recon, static, secrets, deps, triage) are denied `WebFetch` and shell network tools (`curl`, `wget`, `nc`, `ssh`, …) via `--disallowedTools`. This is defense-in-depth, **not** a sandbox — a determined payload can still egress via `python`/`perl`/etc.
+- **Live testing is opt-in and scoped.** Fingerprint and validation run only with `--validate` and only target `--base-url`. Only test systems you are authorized to test.
+- **`--no-safe-only` enables destructive PoCs.** Off by default (safe mode permits non-destructive tests only, incl. boolean/time-based blind SQLi). Use only with explicit authorization.
+- **Secrets in prompts.** `--creds` / `--tokens` are injected into the validation agent's prompt. Avoid `-v` verbose logging in shared environments.
 
 ## Adding a New Provider
 

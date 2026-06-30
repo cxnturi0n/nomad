@@ -135,6 +135,10 @@ Examples:
              "e.g. --light-agents secrets deps fingerprint recon",
     )
     parser.add_argument(
+        "--effort", choices=["low", "medium", "high", "max"], default="",
+        help="Reasoning effort level (Claude provider only). Applied to BOTH model tiers.",
+    )
+    parser.add_argument(
         "--api-key", default="",
         help="API key override (most providers read from env vars by default)",
     )
@@ -220,6 +224,7 @@ Examples:
         model=args.model,
         model_light=args.model_light,
         light_agents=args.light_agents,
+        effort=args.effort,
         api_key=args.api_key,
         base_url=args.base_url,
         tokens=args.tokens,
@@ -260,6 +265,8 @@ def create_runner_from_config(config: EngagementConfig, model_override: str | No
     # Provider-specific config
     if config.provider == "ollama" and config.ollama_host:
         kwargs["api_base"] = config.ollama_host
+    if config.effort:
+        kwargs["effort"] = config.effort  # used by Claude runner; ignored by others
 
     return create_runner(config.provider, **kwargs)
 
@@ -890,6 +897,8 @@ class Pipeline:
         logger.info(f"  Provider:   {self.runner.provider_name} ({self.runner.get_model_display()})")
         if self.light_runner is not None:
             logger.info(f"  Light model:{self.light_runner.get_model_display()} → {', '.join(sorted(self.light_agents))}")
+        if self.config.effort:
+            logger.info(f"  Effort:     {self.config.effort}")
         logger.info(f"  Target:     {self.config.repo_path}")
         logger.info(f"  Scope:      {self.config.scope.value}")
         logger.info(f"  Validate:   {self.config.validate}")

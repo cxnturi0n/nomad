@@ -127,6 +127,7 @@ class EngagementConfig:
     model: str = ""                # strong model override (empty = provider default)
     model_light: str = ""          # cheaper model (same provider) for low-stakes agents
     light_agents: list[str] = field(default_factory=list)  # agents that use model_light
+    effort: str = ""               # reasoning effort (claude only): low|medium|high|max
     api_key: str = ""              # API key override (providers read env by default)
     base_url: str = ""
     tokens: list[str] = field(default_factory=list)

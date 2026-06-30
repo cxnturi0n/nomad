@@ -153,6 +153,7 @@ class TestCliHelp(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertIn("--no-safe-only", proc.stdout)
         self.assertIn("--model-light", proc.stdout)
+        self.assertIn("--effort", proc.stdout)
 
     def test_light_agents_requires_model_light(self):
         # --light-agents without --model-light must be a hard error.
@@ -247,6 +248,12 @@ class TestTriageDedup(unittest.TestCase):
         self.assertEqual(merged["severity"], "critical")    # worst-case kept
         self.assertEqual(merged["cvss_score"], 9.0)
         self.assertEqual(set(merged["original_ids"]), {"VULN-1", "SEC-2"})
+
+
+class TestEffort(unittest.TestCase):
+    def test_claude_runner_carries_effort(self):
+        from utils.runners.claude import ClaudeRunner
+        self.assertEqual(ClaudeRunner(effort="high").extra_config.get("effort"), "high")
 
 
 class TestOsvCount(unittest.TestCase):

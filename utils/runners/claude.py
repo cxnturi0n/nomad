@@ -118,6 +118,9 @@ class ClaudeRunner(BaseRunner):
             shell_cmd += f' --disallowedTools "{disallowed_str}"'
         if self.model:
             shell_cmd += f' --model {self.model}'
+        effort = self.extra_config.get("effort", "")
+        if effort:
+            shell_cmd += f' --effort {effort}'
         if verbose:
             shell_cmd += ' --verbose'
 
