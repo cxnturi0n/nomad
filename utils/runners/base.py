@@ -68,6 +68,7 @@ class BaseRunner(ABC):
     """
 
     provider_name: str = "base"
+    agentic: bool = True  # can iteratively use tools (shell / file browse / network) during a run
 
     def __init__(self, model: str = "", api_base: str = "", api_key: str = "", **kwargs):
         """

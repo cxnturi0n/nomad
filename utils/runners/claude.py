@@ -23,14 +23,35 @@ from utils.runners.base import BaseRunner, RunResult, TOOL_PRESETS, extract_json
 
 logger = logging.getLogger("nomad.runner.claude")
 
-# Claude Code CLI tool names mapped from our semantic presets
+# Bound the rate/usage-limit back-off so a long reset window can't hang the
+# whole pipeline for hours (previously: unbounded recursion + uncapped sleep).
+MAX_RATE_LIMIT_RETRIES = 5
+MAX_WAIT_SECONDS = 3600  # cap a single back-off at 1 hour
+
+# Claude Code CLI tool names mapped from our semantic presets.
+# NOTE: Claude Code's --allowedTools has no "read-only Bash" specifier. The old
+# "Bash(read_only=true)" was an invalid pattern that matched no command, so in
+# headless `-p` mode every bash call (find/grep/wc/cat that recon & static rely
+# on) was denied. We grant plain `Bash` instead, and enforce the read-only
+# intent via a --disallowedTools deny-list (see _resolve_disallowed).
 _CLAUDE_TOOLS = {
     "file_read": "Read",
     "file_write": "Write",
-    "shell_readonly": "Bash(read_only=true)",
+    "shell_readonly": "Bash",
     "shell": "Bash",
     "network": "WebFetch",
 }
+
+# Denied for presets WITHOUT the 'network' capability (everything except the
+# 'full' preset used by the fingerprint/validation agents). Defense-in-depth so
+# an agent analysing untrusted source code can't trivially exfiltrate. This is
+# NOT a sandbox — a determined payload can still egress via python/perl/etc., so
+# run nomad in a network-isolated container when scanning untrusted targets.
+_NETWORK_DENY = [
+    "WebFetch",
+    "Bash(curl:*)", "Bash(wget:*)", "Bash(nc:*)", "Bash(ncat:*)",
+    "Bash(telnet:*)", "Bash(ssh:*)", "Bash(scp:*)",
+]
 
 
 class ClaudeRunner(BaseRunner):
@@ -39,7 +60,25 @@ class ClaudeRunner(BaseRunner):
     def _resolve_tools(self, preset: str) -> list[str]:
         """Convert semantic tool preset to Claude Code --allowedTools list."""
         capabilities = TOOL_PRESETS.get(preset, TOOL_PRESETS["read_only"])["capabilities"]
-        return [_CLAUDE_TOOLS[cap] for cap in capabilities if cap in _CLAUDE_TOOLS]
+        # dict.fromkeys to dedupe while preserving order (shell_readonly/shell both → Bash)
+        return list(dict.fromkeys(
+            _CLAUDE_TOOLS[cap] for cap in capabilities if cap in _CLAUDE_TOOLS
+        ))
+
+    def _resolve_disallowed(self, preset: str) -> list[str]:
+        """
+        Build the --disallowedTools deny-list for a preset. Presets without the
+        'network' capability (read_only, read_write) get network egress denied;
+        presets without 'file_write' also get Write denied. The 'full' preset
+        (fingerprint/validation — they legitimately curl the target) gets nothing.
+        """
+        capabilities = TOOL_PRESETS.get(preset, TOOL_PRESETS["read_only"])["capabilities"]
+        if "network" in capabilities:
+            return []
+        deny = list(_NETWORK_DENY)
+        if "file_write" not in capabilities:
+            deny.append("Write")
+        return deny
 
     def run(
         self,
@@ -53,6 +92,8 @@ class ClaudeRunner(BaseRunner):
     ) -> RunResult:
         tool_list = self._resolve_tools(tools)
         tool_str = ",".join(tool_list)
+        disallowed_list = self._resolve_disallowed(tools)
+        disallowed_str = ",".join(disallowed_list)
 
         # Write prompts to temp files to avoid CLI argument length limits
         # (Linux execve has ~2MB arg limit; large codebases produce huge prompts)
@@ -73,6 +114,8 @@ class ClaudeRunner(BaseRunner):
             f'--allowedTools "{tool_str}"'
         )
 
+        if disallowed_str:
+            shell_cmd += f' --disallowedTools "{disallowed_str}"'
         if self.model:
             shell_cmd += f' --model {self.model}'
         if verbose:
@@ -83,88 +126,115 @@ class ClaudeRunner(BaseRunner):
         start = time.time()
 
         try:
-            result = subprocess.run(
-                shell_cmd,
-                shell=True,
-                cwd=working_dir,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+            for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+                try:
+                    result = subprocess.run(
+                        shell_cmd,
+                        shell=True,
+                        cwd=working_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                    )
+                except subprocess.TimeoutExpired:
+                    return RunResult(
+                        success=False,
+                        duration_seconds=time.time() - start,
+                        error=f"Timed out after {timeout}s",
+                        provider="claude",
+                    )
+                except FileNotFoundError:
+                    return RunResult(
+                        success=False,
+                        error=(
+                            "'claude' CLI not found. Install Claude Code:\n"
+                            "  npm install -g @anthropic-ai/claude-code\n"
+                            "  claude auth login"
+                        ),
+                        provider="claude",
+                    )
 
-            duration = time.time() - start
-            raw = result.stdout.strip()
+                duration = time.time() - start
+                raw = result.stdout.strip()
 
-            if result.returncode != 0:
-                error_msg = result.stderr.strip() or result.stdout.strip() or f"Exit code {result.returncode}"
-                combined = error_msg + " " + raw
+                if result.returncode != 0:
+                    error_msg = result.stderr.strip() or result.stdout.strip() or f"Exit code {result.returncode}"
+                    combined = error_msg + " " + raw
 
-                # Check for rate/usage limiting
-                if self._is_rate_limited(combined) or self._is_usage_limit(combined):
-                    wait = self._get_usage_limit_wait(combined) if self._is_usage_limit(combined) else self._get_rate_limit_wait(combined)
+                    # Bounded retry on rate/usage limiting
+                    if self._is_rate_limited(combined) or self._is_usage_limit(combined):
+                        if attempt >= MAX_RATE_LIMIT_RETRIES:
+                            logger.error(f"[claude] Still rate/usage limited after {MAX_RATE_LIMIT_RETRIES} retries; giving up.")
+                            return RunResult(
+                                success=False,
+                                raw_output=raw,
+                                duration_seconds=duration,
+                                error=f"Rate/usage limited after {MAX_RATE_LIMIT_RETRIES} retries: {error_msg[:300]}",
+                                provider="claude",
+                                model=self.model,
+                            )
+                        wait = self._get_usage_limit_wait(combined) if self._is_usage_limit(combined) else self._get_rate_limit_wait(combined)
+                        wait = min(wait, MAX_WAIT_SECONDS)
+                        logger.warning(
+                            f"[claude] Rate/usage limited (attempt {attempt + 1}/{MAX_RATE_LIMIT_RETRIES}). "
+                            f"Waiting {wait // 60}m {wait % 60}s..."
+                        )
+                        time.sleep(wait)
+                        logger.info("[claude] Retrying after rate limit wait...")
+                        continue
+
+                    logger.error(f"[claude] Failed: {error_msg[:500]}")
+                    return RunResult(
+                        success=False,
+                        raw_output=raw,
+                        duration_seconds=duration,
+                        error=error_msg,
+                        provider="claude",
+                        model=self.model,
+                    )
+
+                parsed, cost = self._parse_output(raw)
+
+                # Rate limit can also appear in exit-0 responses (is_error=true)
+                if self._is_usage_limit(raw):
+                    if attempt >= MAX_RATE_LIMIT_RETRIES:
+                        logger.error(f"[claude] Still usage limited after {MAX_RATE_LIMIT_RETRIES} retries; giving up.")
+                        return RunResult(
+                            success=False,
+                            raw_output=raw,
+                            duration_seconds=duration,
+                            error=f"Usage limited after {MAX_RATE_LIMIT_RETRIES} retries",
+                            provider="claude",
+                            model=self.model,
+                        )
+                    wait = min(self._get_usage_limit_wait(raw), MAX_WAIT_SECONDS)
                     logger.warning(
-                        f"[claude] Rate/usage limited. Waiting {wait // 60}m {wait % 60}s..."
+                        f"[claude] Usage limit hit (attempt {attempt + 1}/{MAX_RATE_LIMIT_RETRIES}). "
+                        f"Waiting {wait // 60}m {wait % 60}s for reset..."
                     )
                     time.sleep(wait)
-                    logger.info("[claude] Retrying after rate limit wait...")
-                    return self.run(
-                        system_prompt, task_prompt, working_dir,
-                        tools, max_turns, timeout, verbose,
-                    )
+                    logger.info("[claude] Retrying after usage limit wait...")
+                    continue
 
-                logger.error(f"[claude] Failed: {error_msg[:500]}")
                 return RunResult(
-                    success=False,
+                    success=True,
                     raw_output=raw,
+                    parsed_json=parsed,
                     duration_seconds=duration,
-                    error=error_msg,
+                    cost_usd=cost,
                     provider="claude",
                     model=self.model,
                 )
 
-            parsed, cost = self._parse_output(raw)
-
-            # Check for rate limit in "successful" responses where
-            # Claude CLI returns exit code 0 but is_error=true
-            if self._is_usage_limit(raw):
-                wait = self._get_usage_limit_wait(raw)
-                logger.warning(
-                    f"[claude] Usage limit hit. Waiting {wait // 60}m {wait % 60}s for reset..."
-                )
-                time.sleep(wait)
-                logger.info("[claude] Retrying after usage limit wait...")
-                return self.run(
-                    system_prompt, task_prompt, working_dir,
-                    tools, max_turns, timeout, verbose,
-                )
-
+            # Loop exhausted without an explicit return (defensive)
             return RunResult(
-                success=True,
-                raw_output=raw,
-                parsed_json=parsed,
-                duration_seconds=duration,
-                cost_usd=cost,
+                success=False,
+                duration_seconds=time.time() - start,
+                error="Rate limit retries exhausted",
                 provider="claude",
                 model=self.model,
             )
 
-        except subprocess.TimeoutExpired:
-            return RunResult(
-                success=False,
-                duration_seconds=time.time() - start,
-                error=f"Timed out after {timeout}s",
-                provider="claude",
-            )
-        except FileNotFoundError:
-            return RunResult(
-                success=False,
-                error=(
-                    "'claude' CLI not found. Install Claude Code:\n"
-                    "  npm install -g @anthropic-ai/claude-code\n"
-                    "  claude auth login"
-                ),
-                provider="claude",
-            )
         except Exception as e:
             logger.error(f"[claude] Error: {e}")
             return RunResult(

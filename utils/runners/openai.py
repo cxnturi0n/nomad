@@ -36,11 +36,25 @@ _CODEX_POLICIES = {
 class OpenAIRunner(BaseRunner):
     provider_name = "openai"
 
+    @property
+    def agentic(self) -> bool:
+        # Codex CLI is agentic; the API fallback mode is single-shot (no tools).
+        return not self.api_mode
+
     def __init__(self, model: str = "", api_base: str = "", api_key: str = "", **kwargs):
         super().__init__(model=model, api_base=api_base, api_key=api_key, **kwargs)
         self.api_mode: bool = kwargs.get("api_mode", False)
         if not self.model:
             self.model = "o4-mini"  # sensible default for code analysis
+
+    @staticmethod
+    def _is_reasoning_model(model: str) -> bool:
+        """
+        o-series and GPT-5 reasoning models reject the `temperature` parameter
+        and require `max_completion_tokens` instead of `max_tokens`.
+        """
+        m = (model or "").lower()
+        return m.startswith(("o1", "o3", "o4")) or m.startswith("gpt-5") or "reasoning" in m
 
     def run(
         self,
@@ -201,16 +215,23 @@ class OpenAIRunner(BaseRunner):
         logger.info(f"[openai/api] Running (model={self.model})")
         start = time.time()
 
+        # Build params compatible with both classic and reasoning models.
+        create_kwargs = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": task_prompt},
+            ],
+        }
+        if self._is_reasoning_model(self.model):
+            # Reasoning models: no temperature, and token cap uses the new param.
+            create_kwargs["max_completion_tokens"] = 16384
+        else:
+            create_kwargs["temperature"] = 0
+            create_kwargs["max_tokens"] = 16384
+
         try:
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": task_prompt},
-                ],
-                temperature=0,
-                max_tokens=16384,
-            )
+            response = client.chat.completions.create(**create_kwargs)
 
             duration = time.time() - start
             raw = response.choices[0].message.content or ""

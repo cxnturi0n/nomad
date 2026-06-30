@@ -9,7 +9,7 @@ This is NOT an LLM agent — it's a deterministic Python program that:
   2. Creates the appropriate AI provider runner
   3. Runs agents in the correct order
   4. Passes context between agents
-  5. Manages scaling (parallel sub-agent calls for large repos)
+  5. Manages scaling (partition-based; agents currently run sequentially)
   6. Tracks progress and handles errors
 
 Supported providers:
@@ -18,9 +18,9 @@ Supported providers:
   ollama  — Ollama local models (single-shot, file context injected)
 
 Usage:
-  python nomad.py --repo ./target-app
-  python nomad.py --repo ./target-app --provider ollama --model qwen2.5-coder:32b
-  python nomad.py --repo ./target-app --provider openai --model o4-mini
+  python3 nomad --repo ./target-app
+  python3 nomad --repo ./target-app --provider ollama --model qwen2.5-coder:32b
+  python3 nomad --repo ./target-app --provider openai --model o4-mini
 """
 
 import argparse
@@ -122,7 +122,17 @@ Examples:
     )
     parser.add_argument(
         "--model", default="",
-        help="Model override (provider-specific). Defaults: claude=default, openai=o4-mini, ollama=qwen2.5-coder:32b",
+        help="Strong model override (provider-specific). Defaults: claude=default, openai=o4-mini, ollama=qwen2.5-coder:32b",
+    )
+    parser.add_argument(
+        "--model-light", default="",
+        help="Cheaper model (SAME provider) for low-stakes agents — enables tiered execution to save tokens. "
+             "Default light agents: secrets, deps, fingerprint. e.g. claude: --model claude-opus-4-8 --model-light claude-haiku-4-5",
+    )
+    parser.add_argument(
+        "--light-agents", nargs="*", default=[], metavar="AGENT",
+        help="Override which agents use --model-light. Valid: recon, static, secrets, deps, triage, fingerprint, validation. "
+             "e.g. --light-agents secrets deps fingerprint recon",
     )
     parser.add_argument(
         "--api-key", default="",
@@ -145,7 +155,10 @@ Examples:
 
     # Validation (A7)
     parser.add_argument("--validate", action="store_true", help="Enable active validation (A7)")
-    parser.add_argument("--safe-only", action="store_true", default=True, help="Non-destructive PoCs only (default: true)")
+    parser.add_argument(
+        "--safe-only", action=argparse.BooleanOptionalAction, default=True,
+        help="Non-destructive PoCs only (default: true). Use --no-safe-only to permit destructive tests.",
+    )
     parser.add_argument("--base-url", default="", help="Running app URL (required for --validate)")
     parser.add_argument("--tokens", nargs="*", default=[], help="Auth tokens for validation")
     parser.add_argument("--creds", nargs="*", default=[], help="Credentials for validation (user:pass)")
@@ -159,7 +172,7 @@ Examples:
     parser.add_argument("--engagement-id", default="", help="Engagement ID for the report")
 
     # Execution
-    parser.add_argument("--max-concurrent", type=int, default=5, help="Max parallel agents (default: 5)")
+    parser.add_argument("--max-concurrent", type=int, default=5, help="Reserved for future parallel execution; agents currently run sequentially (default: 5)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     parser.add_argument(
         "--skip", nargs="*", default=[],
@@ -168,7 +181,7 @@ Examples:
     )
     parser.add_argument(
         "--fresh", action="store_true",
-        help="Ignore checkpoint and start fresh (deletes previous output)",
+        help="Ignore checkpoint and re-run all phases (does not delete prior output files)",
     )
     parser.add_argument(
         "--caveman", action="store_true",
@@ -193,10 +206,20 @@ Examples:
         if s not in valid_skips:
             parser.error(f"Unknown agent '{s}' in --skip. Valid: {', '.join(sorted(valid_skips))}")
 
+    # Validate --light-agents (recon IS allowed here, unlike --skip)
+    valid_agents = {"recon", "static", "secrets", "deps", "triage", "fingerprint", "validation"}
+    for a in args.light_agents:
+        if a not in valid_agents:
+            parser.error(f"Unknown agent '{a}' in --light-agents. Valid: {', '.join(sorted(valid_agents))}")
+    if args.light_agents and not args.model_light:
+        parser.error("--light-agents requires --model-light")
+
     return EngagementConfig(
         repo_path=str(repo_path),
         provider=args.provider,
         model=args.model,
+        model_light=args.model_light,
+        light_agents=args.light_agents,
         api_key=args.api_key,
         base_url=args.base_url,
         tokens=args.tokens,
@@ -219,12 +242,18 @@ Examples:
 
 # ── Runner Factory ───────────────────────────────────────────────────────────
 
-def create_runner_from_config(config: EngagementConfig) -> BaseRunner:
-    """Create the appropriate runner based on CLI config."""
+# Agents that use the cheaper --model-light by default (tool-assisted / mechanical).
+# The reasoning-heavy agents (recon, static, triage, validation) stay on the strong model.
+DEFAULT_LIGHT_AGENTS = {"secrets", "deps", "fingerprint"}
+
+
+def create_runner_from_config(config: EngagementConfig, model_override: str | None = None) -> BaseRunner:
+    """Create a runner for the chosen provider. model_override picks a specific model (e.g. the light tier)."""
     kwargs = {}
 
-    if config.model:
-        kwargs["model"] = config.model
+    model = model_override if model_override is not None else config.model
+    if model:
+        kwargs["model"] = model
     if config.api_key:
         kwargs["api_key"] = config.api_key
 
@@ -337,9 +366,12 @@ class ScalingEngine:
 class Pipeline:
     CHECKPOINT_FILE = "checkpoint.json"
 
-    def __init__(self, config: EngagementConfig, runner: BaseRunner):
+    def __init__(self, config: EngagementConfig, runner: BaseRunner,
+                 light_runner: BaseRunner | None = None, light_agents: set[str] | None = None):
         self.config = config
-        self.runner = runner
+        self.runner = runner                       # strong model (default tier)
+        self.light_runner = light_runner           # cheaper model, or None if not tiered
+        self.light_agents = light_agents or set()  # agent keys routed to the light model
         self.output_dir = Path(config.output_dir).resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.runs: list[AgentRun] = []
@@ -366,6 +398,19 @@ class Pipeline:
 
         try:
             data = json.loads(cp.read_text())
+
+            # Guard against reusing a checkpoint written for a different target
+            # repo (same --output-dir, different --repo) — that would silently
+            # load stale recon/findings for the wrong codebase.
+            saved_repo = data.get("repo", "")
+            if saved_repo and saved_repo != self.config.repo_path:
+                logger.warning(
+                    f"Checkpoint was written for a different repo ({saved_repo}); "
+                    f"ignoring it and starting fresh. Use a separate --output-dir per target."
+                )
+                self.completed_phases = set()
+                return
+
             self.completed_phases = set(data.get("completed_phases", []))
 
             if self.completed_phases:
@@ -442,7 +487,13 @@ class Pipeline:
                 logger.error("Checkpoint says recon done but no output found. Use --fresh.")
                 return False
         else:
-            recon = ReconAgent(self.config, self.output_dir / "recon", self.runner)
+            recon_runner = self._runner_for("recon")
+            if not getattr(recon_runner, "agentic", True):
+                logger.warning(
+                    f"Recon runner '{recon_runner.provider_name}' is single-shot (non-agentic) — it cannot "
+                    f"browse files itself; the map relies on pre-loaded context and may be shallow."
+                )
+            recon = ReconAgent(self.config, self.output_dir / "recon", recon_runner)
             run = recon.run()
             self.runs.append(run)
 
@@ -487,7 +538,7 @@ class Pipeline:
                 a2 = StaticAnalysisAgent(
                     self.config,
                     self.output_dir / "analysis",
-                    self.runner,
+                    self._runner_for("static"),
                     scope_name=scope_name,
                 )
                 context = {
@@ -536,7 +587,7 @@ class Pipeline:
             a3 = SecretsAgent(
                 self.config,
                 self.output_dir / "secrets",
-                self.runner,
+                self._runner_for("secrets"),
             )
             context_a3 = {"recon_report": self.recon_report}
             run_a3 = a3.run(context=context_a3)
@@ -575,7 +626,7 @@ class Pipeline:
             a4 = DependencyAuditAgent(
                 self.config,
                 self.output_dir / "deps",
-                self.runner,
+                self._runner_for("deps"),
             )
             context_a4 = {"recon_report": self.recon_report}
             run_a4 = a4.run(context=context_a4)
@@ -628,7 +679,7 @@ class Pipeline:
             a6 = TriageAgent(
                 self.config,
                 self.output_dir / "triage",
-                self.runner,
+                self._runner_for("triage"),
             )
             context_a6 = {
                 "recon_report": self.recon_report,
@@ -672,13 +723,18 @@ class Pipeline:
                 logger.info("Skipped (--skip fingerprint)")
             elif self._phase_done("fingerprint"):
                 logger.info("Resumed from checkpoint — skipping")
+            elif not getattr(self._runner_for("fingerprint"), "agentic", True):
+                logger.warning(
+                    "Fingerprint requires live HTTP probing (shell), but the selected runner is "
+                    "single-shot — skipping (it would fabricate results it cannot execute)."
+                )
             else:
                 logger.info(f"Fingerprinting {self.config.base_url}...")
 
                 a_fp = FingerprintAgent(
                     self.config,
                     self.output_dir / "fingerprint",
-                    self.runner,
+                    self._runner_for("fingerprint"),
                 )
                 context_fp = {"recon_report": self.recon_report}
                 run_fp = a_fp.run(context=context_fp)
@@ -718,6 +774,11 @@ class Pipeline:
                 logger.info("Skipped (--skip validation)")
             elif self._phase_done("validation"):
                 logger.info("Resumed from checkpoint — skipping")
+            elif not getattr(self._runner_for("validation"), "agentic", True):
+                logger.warning(
+                    "Validation requires live exploit execution (shell), but the selected runner is "
+                    "single-shot — skipping (it would fabricate confirmations it cannot execute)."
+                )
             elif not self.triaged_findings.get("findings"):
                 logger.warning("No triaged findings to validate — skipping")
             else:
@@ -730,7 +791,7 @@ class Pipeline:
                 a7 = ValidationAgent(
                     self.config,
                     self.output_dir / "validation",
-                    self.runner,
+                    self._runner_for("validation"),
                 )
                 context_a7 = {
                     "triaged_findings": self.triaged_findings,
@@ -777,6 +838,12 @@ class Pipeline:
         """Check if an agent should run based on --skip flag."""
         return agent_key not in self.config.skip_agents
 
+    def _runner_for(self, agent_key: str) -> BaseRunner:
+        """Pick the strong or light model runner for a given agent."""
+        if self.light_runner is not None and agent_key in self.light_agents:
+            return self.light_runner
+        return self.runner
+
     def _merge_static_findings(self, all_findings: list[dict]) -> dict:
         """Merge findings from multiple partition runs into a single result."""
         merged_findings = []
@@ -821,6 +888,8 @@ class Pipeline:
 ╚══════════════════════════════════════════════════════════════╝"""
         logger.info(banner)
         logger.info(f"  Provider:   {self.runner.provider_name} ({self.runner.get_model_display()})")
+        if self.light_runner is not None:
+            logger.info(f"  Light model:{self.light_runner.get_model_display()} → {', '.join(sorted(self.light_agents))}")
         logger.info(f"  Target:     {self.config.repo_path}")
         logger.info(f"  Scope:      {self.config.scope.value}")
         logger.info(f"  Validate:   {self.config.validate}")
@@ -915,22 +984,35 @@ def main():
             cp.unlink()
             logger.info("Fresh run: checkpoint cleared")
 
-    # Create runner for the chosen provider
+    # Create runner(s) for the chosen provider. A light tier is built only if
+    # --model-light is set; otherwise every agent uses the single strong runner.
     try:
         runner = create_runner_from_config(config)
+        light_runner = None
+        light_agents: set[str] = set()
+        if config.model_light:
+            light_agents = set(config.light_agents) if config.light_agents else set(DEFAULT_LIGHT_AGENTS)
+            light_runner = create_runner_from_config(config, model_override=config.model_light)
     except ValueError as e:
         logger.error(str(e))
         sys.exit(1)
 
-    # Preflight check
+    # Preflight check (both tiers — e.g. Ollama must have each model pulled)
     ok, msg = runner.preflight()
     if not ok:
         logger.error(f"Provider preflight failed:\n{msg}")
         sys.exit(1)
     logger.info(f"Provider ready: {msg}")
 
+    if light_runner is not None:
+        ok2, msg2 = light_runner.preflight()
+        if not ok2:
+            logger.error(f"Light model preflight failed:\n{msg2}")
+            sys.exit(1)
+        logger.info(f"Light model ready: {msg2}")
+
     # Run pipeline
-    pipeline = Pipeline(config, runner)
+    pipeline = Pipeline(config, runner, light_runner, light_agents)
     success = pipeline.run()
     sys.exit(0 if success else 1)
 

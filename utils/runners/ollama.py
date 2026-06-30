@@ -38,6 +38,7 @@ _DEFAULT_CTX = 32768
 
 class OllamaRunner(BaseRunner):
     provider_name = "ollama"
+    agentic = False  # single-shot prompt-stuffing: cannot run shell/curl or browse files
 
     def __init__(self, model: str = "", api_base: str = "", api_key: str = "", **kwargs):
         super().__init__(model=model, api_base=api_base, api_key=api_key, **kwargs)

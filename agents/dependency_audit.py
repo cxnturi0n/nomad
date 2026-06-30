@@ -64,6 +64,15 @@ def detect_ecosystems(repo_path: str) -> list[str]:
     return found
 
 
+def _count_osv_vulns(data: dict) -> int:
+    """Count vulnerabilities across ALL packages in ALL results (not just packages[0])."""
+    return sum(
+        len(pkg.get("vulnerabilities", []))
+        for r in data.get("results", [])
+        for pkg in r.get("packages", [])
+    )
+
+
 # ── Tool Runner Helpers ──────────────────────────────────────────────────────
 
 class ToolResult:
@@ -152,16 +161,28 @@ def run_pip_audit(repo_path: str, timeout: int = 120) -> ToolResult:
 
     result.available = True
 
-    # Find requirements file
+    # pip-audit needs an explicit requirements file. Without `-r`, it audits the
+    # *current* Python environment (i.e. nomad's own venv), NOT the target repo —
+    # producing findings about the wrong packages. So require a real target file.
     req_file = None
-    for candidate in ["requirements.txt", "requirements/base.txt", "requirements/prod.txt"]:
+    for candidate in [
+        "requirements.txt", "requirements/base.txt", "requirements/prod.txt",
+        "requirements/requirements.txt", "requirements/production.txt",
+    ]:
         if (Path(repo_path) / candidate).exists():
             req_file = candidate
             break
 
-    args = ["pip-audit", "--format", "json", "--output", "-"]
-    if req_file:
-        args.extend(["-r", req_file])
+    if not req_file:
+        result.error = (
+            "no requirements.txt found — pip-audit skipped to avoid auditing nomad's "
+            "own environment. pyproject.toml/Pipfile/lockfile-only projects are covered "
+            "by the osv-scanner fallback."
+        )
+        logger.warning(f"[pip_audit] {result.error}")
+        return result
+
+    args = ["pip-audit", "--format", "json", "--output", "-", "-r", req_file]
 
     try:
         proc = subprocess.run(
@@ -269,9 +290,7 @@ def run_osv_scanner(repo_path: str, timeout: int = 120) -> ToolResult:
             try:
                 data = json.loads(raw)
                 vulns = data.get("results", [])
-                total = sum(len(r.get("packages", [{}])[0].get("vulnerabilities", []))
-                           for r in vulns if r.get("packages"))
-                result.findings_raw = total
+                result.findings_raw = _count_osv_vulns(data)
                 result.parsed = vulns
             except json.JSONDecodeError:
                 result.raw_output = raw[:5000]

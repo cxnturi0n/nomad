@@ -13,6 +13,8 @@ of this agent, each scoped to a different module or vulnerability class.
 
 import json
 import logging
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -24,13 +26,46 @@ logger = logging.getLogger("nomad.agents.static_analysis")
 
 PROMPT_FILE = Path(__file__).parent / "prompts" / "static_analysis.md"
 
+# Semgrep SAST is run once per repo and cached (A2 may instantiate per-partition).
+_SEMGREP_SAST_CACHE: dict[str, list] = {}
+
+_SAST_CONFIGS = [
+    "p/security-audit", "p/owasp-top-ten", "p/command-injection",
+    "p/sql-injection", "p/xss", "p/insecure-transport", "p/default",
+]
+
+
+def run_semgrep_sast(repo_path: str, timeout: int = 300) -> list:
+    """Run Semgrep SAST rulesets once; return raw results (or [] if unavailable)."""
+    if not shutil.which("semgrep"):
+        logger.info("[a2_static] semgrep not installed — skipping SAST pre-scan")
+        return []
+    cmd = ["semgrep", "scan"]
+    for c in _SAST_CONFIGS:
+        cmd += ["--config", c]
+    cmd += ["--json", "--quiet", "--no-git-ignore", "--timeout", "30", repo_path]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        raw = proc.stdout.strip()
+        if not raw:
+            return []
+        findings = json.loads(raw).get("results", [])
+        logger.info(f"[a2_static] semgrep SAST pre-scan: {len(findings)} raw findings")
+        return findings
+    except subprocess.TimeoutExpired:
+        logger.warning(f"[a2_static] semgrep SAST timed out after {timeout}s")
+        return []
+    except Exception as e:
+        logger.warning(f"[a2_static] semgrep SAST failed: {e}")
+        return []
+
 
 class StaticAnalysisAgent(BaseAgent):
     name = "a2_static_analysis"
     description = "Static source code analysis — hunts for security vulnerabilities"
     tools = "read_only"
     max_turns = 75  # may need many turns for thorough analysis
-    timeout = 6000   # 15 min — deep analysis of large modules takes time
+    timeout = 6000   # 100 min — deep analysis of large modules can take a long time
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner,
                  scope_name: str = "full"):
@@ -53,13 +88,14 @@ class StaticAnalysisAgent(BaseAgent):
 
         # Build a focused context injection from the recon report
         recon_summary = self._build_recon_context(recon, partition)
+        semgrep_section = self._build_semgrep_context(partition)
 
         prompt = f"""Perform a security-focused static analysis of the source code in the current working directory.
 
 ## RECON CONTEXT (from the reconnaissance agent)
 
 {recon_summary}
-
+{semgrep_section}
 ## YOUR TASK
 
 1. Read the source files listed in the recon context above, starting with the highest-risk ones.
@@ -174,6 +210,41 @@ No markdown, no prose — just valid JSON starting with {{ and ending with }}.""
         if not scope_paths or scope_paths == ["."]:
             return True
         return any(filepath.startswith(p) for p in scope_paths)
+
+    def _semgrep_findings(self) -> list:
+        """Semgrep SAST results for this repo (run once, cached across partitions)."""
+        repo = self.config.repo_path
+        if repo not in _SEMGREP_SAST_CACHE:
+            _SEMGREP_SAST_CACHE[repo] = run_semgrep_sast(repo)
+        return _SEMGREP_SAST_CACHE[repo]
+
+    def _build_semgrep_context(self, partition: dict) -> str:
+        """Inject Semgrep SAST findings (filtered to this partition) as leads to validate."""
+        findings = self._semgrep_findings()
+        if not findings:
+            return ""
+
+        repo = self.config.repo_path.rstrip("/")
+
+        def _rel(p: str) -> str:
+            p = p or ""
+            if p.startswith(repo):
+                p = p[len(repo):].lstrip("/")
+            return p
+
+        scope_paths = partition.get("paths", []) if partition else []
+        if scope_paths and scope_paths != ["."]:
+            findings = [f for f in findings if self._in_scope(_rel(f.get("path", "")), scope_paths)]
+        if not findings:
+            return ""
+
+        from agents.secrets import format_semgrep_for_prompt
+        body = format_semgrep_for_prompt(findings, max_findings=40)
+        return (
+            "\n## SEMGREP SAST PRE-SCAN (tool leads — VALIDATE, do not trust blindly)\n\n"
+            f"{body}\n\n"
+            "Confirm each by reading the code, discard false positives, and add anything Semgrep missed.\n"
+        )
 
     def parse_output(self, result: RunResult) -> Optional[dict]:
         data = result.parsed_json

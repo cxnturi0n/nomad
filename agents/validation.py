@@ -54,7 +54,7 @@ def _safe_join(val, sep: str = ", ", max_items: int = 8) -> str:
 class ValidationAgent(BaseAgent):
     name = "a7_validation"
     description = "Exploit validation — confirms vulnerabilities with adaptive PoC testing"
-    tools = "read_write"  # needs bash for curl
+    tools = "full"  # needs bash for curl + network egress to the target
     max_turns = 80
     timeout = 1200  # 20 min — needs time for multiple curl rounds with delays
 

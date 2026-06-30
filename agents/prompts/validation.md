@@ -102,7 +102,12 @@ For every confirmed finding, capture:
 
 ## OUTPUT FORMAT — EXACT SCHEMA REQUIRED
 
-YOUR ENTIRE RESPONSE MUST BE EXACTLY ONE JSON OBJECT:
+YOUR ENTIRE RESPONSE MUST BE EXACTLY ONE JSON OBJECT.
+
+Record EVERY attempt as a separate entry in `rounds` — including blocked ones —
+so the report shows which defenses you hit and how you adapted. If you defeat a
+WAF/filter/rate-limit to land the exploit, list what you bypassed in
+`defenses_bypassed`.
 
 {
   "validations": [
@@ -110,54 +115,81 @@ YOUR ENTIRE RESPONSE MUST BE EXACTLY ONE JSON OBJECT:
       "finding_id": "TRIAGE-001",
       "title": "SQL Injection in /login endpoint",
       "status": "confirmed",
-      "poc_command": "curl -s 'http://localhost:3000/login?username=admin%27--&password=anything'",
-      "poc_response": "Login successful!",
-      "evidence": "The server returned 'Login successful!' with an invalid password, proving the SQL injection bypasses authentication. The -- comment sequence truncates the password check.",
+      "rounds": [
+        {
+          "round": 1,
+          "technique": "naive auth-bypass payload",
+          "poc_command": "curl -s --connect-timeout 10 --max-time 30 'http://localhost:3000/login?username=admin%27--&password=x'",
+          "response_code": 403,
+          "response_excerpt": "Request blocked (Cloudflare Ray ID ...)",
+          "result": "blocked_by_waf"
+        },
+        {
+          "round": 2,
+          "technique": "inline comment + mixed case to evade WAF signature",
+          "poc_command": "curl -s --connect-timeout 10 --max-time 30 'http://localhost:3000/login?username=admin%27/**/oR/**/1=1--&password=x'",
+          "response_code": 200,
+          "response_excerpt": "Login successful!",
+          "result": "success"
+        }
+      ],
+      "final_poc": "curl -s 'http://localhost:3000/login?username=admin%27/**/oR/**/1=1--&password=x'",
+      "final_response": "Login successful!",
+      "evidence": "Authentication bypassed with an invalid password. Round 1 (naive payload) was blocked by the WAF; round 2 bypassed it using inline comments and mixed case.",
+      "defenses_bypassed": ["Cloudflare WAF (SQLi signature)"],
       "notes": "",
       "severity_adjusted": "critical",
       "cvss_adjusted": 9.8
     },
     {
-      "finding_id": "TRIAGE-005",
-      "title": "Missing rate limiting on /login",
-      "status": "confirmed",
-      "poc_command": "for i in $(seq 1 20); do curl -s -o /dev/null -w '%{http_code} ' 'http://localhost:3000/login?username=admin&password=attempt'$i; done",
-      "poc_response": "200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200 200",
-      "evidence": "20 consecutive login attempts with different passwords all returned HTTP 200 with no throttling, blocking, or CAPTCHA challenge.",
-      "notes": "",
-      "severity_adjusted": "medium",
-      "cvss_adjusted": 5.3
+      "finding_id": "TRIAGE-004",
+      "title": "Reflected XSS in /search",
+      "status": "not_exploitable",
+      "rounds": [
+        {
+          "round": 1,
+          "technique": "basic script tag",
+          "poc_command": "curl -s 'http://localhost:3000/search?q=<script>alert(1)</script>'",
+          "response_code": 200,
+          "response_excerpt": "...&lt;script&gt;alert(1)&lt;/script&gt;...",
+          "result": "inconclusive"
+        }
+      ],
+      "final_poc": "curl -s 'http://localhost:3000/search?q=<script>alert(1)</script>'",
+      "final_response": "...&lt;script&gt;alert(1)&lt;/script&gt;...",
+      "evidence": "Payload is HTML-entity-encoded in the response; no executable injection. The framework auto-escapes output.",
+      "defenses_bypassed": [],
+      "notes": "Output encoding appears to be applied globally.",
+      "severity_adjusted": "info",
+      "cvss_adjusted": 0.0
     }
   ],
   "untested": [
     {
       "finding_id": "TRIAGE-007",
       "title": "Missing security headers",
-      "reason": "Cannot be validated via HTTP request — requires browser context for CSP/X-Frame-Options testing"
+      "reason": "Cannot be validated via a single HTTP request — requires browser context for CSP/X-Frame-Options testing"
     }
   ],
   "summary": {
-    "total_findings": 8,
-    "tested": 6,
-    "confirmed": 4,
-    "not_exploitable": 1,
-    "needs_manual_review": 1,
-    "untested": 2,
-    "safe_mode": true,
     "target_url": "http://localhost:3000",
-    "test_duration_seconds": 45
+    "safe_mode": true,
+    "note": "The orchestrator recomputes tested/confirmed/bypass counts from the validations array; you need not total them precisely."
   }
 }
 
 ## CRITICAL RULES
 
 1. Output ONLY the JSON object. No text before or after. No markdown fences.
-2. Use EXACTLY these keys: "validations", "untested", "summary".
-3. Every validation MUST have: finding_id, title, status, poc_command, poc_response, evidence, notes, severity_adjusted, cvss_adjusted.
+2. Use EXACTLY these top-level keys: "validations", "untested", "summary".
+3. Every validation MUST have: finding_id, title, status, rounds, final_poc, final_response, evidence, defenses_bypassed, notes, severity_adjusted, cvss_adjusted.
 4. status MUST be one of: "confirmed", "not_exploitable", "needs_manual_review".
-5. poc_command: the EXACT curl command executed. Must be reproducible.
-6. poc_response: the relevant part of the HTTP response (truncate if very long).
-7. evidence: clear explanation of WHY the response proves the vulnerability.
-8. severity_adjusted / cvss_adjusted: may differ from original if testing reveals different impact.
-9. untested: findings that could not be tested (e.g., code-level issues, config issues).
-10. RESPECT SAFETY MODE. If safe_mode is true, DO NOT execute destructive operations.
+5. rounds MUST contain one entry PER attempt (including blocked/failed ones). Each round MUST have: round, technique, poc_command, response_code, response_excerpt, result.
+6. round.result MUST be one of: "success", "blocked_by_waf", "blocked_by_filter", "blocked_by_rate_limit", "error", "inconclusive".
+7. defenses_bypassed: list every WAF/filter/rate-limit you defeated to reach success (empty list if none, or if not confirmed).
+8. final_poc: the single reproducible command that proves the finding (the successful one, for confirmed). final_response: its relevant response excerpt.
+9. poc_command in each round: the EXACT command executed. Must be reproducible.
+10. evidence: clear explanation of WHY the responses prove (or disprove) the vulnerability.
+11. severity_adjusted / cvss_adjusted: may differ from the original if testing reveals different real-world impact.
+12. untested: findings that could not be tested (code-level/config issues with no HTTP-observable behavior).
+13. RESPECT SAFETY MODE. If safe_mode is true, DO NOT execute destructive operations (no POST/PUT/DELETE that writes data, no file uploads, no data exfiltration beyond minimal proof).

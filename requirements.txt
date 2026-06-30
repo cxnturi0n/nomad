@@ -1,0 +1,15 @@
+# Nomad core has NO required third-party Python dependencies — it runs on the
+# standard library (argparse, json, urllib, subprocess) plus your chosen
+# provider backend:
+#
+#   claude : npm install -g @anthropic-ai/claude-code   (then: claude auth login)
+#   openai : npm install -g @openai/codex                (Codex CLI, agentic)
+#   ollama : https://ollama.com                          (local server)
+#
+# Optional Python dependency — ONLY needed for the OpenAI API fallback mode
+# (utils/runners/openai.py, used when the `codex` CLI is not installed):
+#
+#   pip install "openai>=1.40.0"
+#
+# Optional external security tools (auto-detected if on PATH; improve results):
+#   semgrep, trufflehog, npm, pip-audit, osv-scanner, cargo-audit

@@ -112,7 +112,13 @@ def run_trufflehog(repo_path: str, timeout: int = 120) -> ToolResult:
 
 
 def run_semgrep(repo_path: str, timeout: int = 300) -> ToolResult:
-    """Run Semgrep with comprehensive security rulesets."""
+    """
+    Run Semgrep with SECRET-detection rulesets only.
+
+    General SAST rulesets (sql-injection, xss, command-injection, owasp-top-ten,
+    security-audit) are run by the A2 Static Analysis agent — that is where their
+    findings belong. A3 keeps the secret/credential-focused rules.
+    """
     result = ToolResult("semgrep")
 
     if not shutil.which("semgrep"):
@@ -127,14 +133,7 @@ def run_semgrep(repo_path: str, timeout: int = 300) -> ToolResult:
             [
                 "semgrep", "scan",
                 "--config", "p/secrets",
-                "--config", "p/security-audit",
-                "--config", "p/owasp-top-ten",
-                "--config", "p/command-injection",
-                "--config", "p/sql-injection",
-                "--config", "p/xss",
-                "--config", "p/insecure-transport",
                 "--config", "p/jwt",
-                "--config", "p/default",
                 "--json",
                 "--quiet",
                 "--no-git-ignore",  # scan everything

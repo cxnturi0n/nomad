@@ -30,27 +30,27 @@ Works with **Claude**, **OpenAI**, or local **Ollama** models.
 
 ```bash
 # Full scan with Claude
-python3 nomad.py --repo /path/to/target-app
+python3 nomad --repo /path/to/target-app
 
 # OpenAI
-python3 nomad.py --repo /path/to/target-app --provider openai --model o4-mini
+python3 nomad --repo /path/to/target-app --provider openai --model o4-mini
 
 # Ollama (free, offline)
-python3 nomad.py --repo /path/to/target-app --provider ollama --model qwen2.5-coder:32b
+python3 nomad --repo /path/to/target-app --provider ollama --model qwen2.5-coder:32b
 
 # Quick scan, verbose
-python3 nomad.py --repo /path/to/target-app --scope quick -v
+python3 nomad --repo /path/to/target-app --scope quick -v
 
 # Full scan + active exploit validation against a running app
-python3 nomad.py --repo /path/to/target-app \
+python3 nomad --repo /path/to/target-app \
   --validate --base-url http://localhost:3000 \
   --creds "admin:password123" --safe-only
 
 # Skip slow agents
-python3 nomad.py --repo /path/to/target-app --skip deps triage
+python3 nomad --repo /path/to/target-app --skip deps triage
 
 # Only recon + static analysis
-python3 nomad.py --repo /path/to/target-app --skip secrets deps triage fingerprint validation
+python3 nomad --repo /path/to/target-app --skip secrets deps triage fingerprint validation
 ```
 
 ## Agent Pipeline
@@ -86,14 +86,16 @@ A1 feeds every downstream agent. A2/A3/A4 run independently and produce findings
 |---|---|---|
 | `--repo` | Path to target repository (**required**) | — |
 | `--provider` | `claude`, `openai`, `ollama` | `claude` |
-| `--model` | Model override | auto per provider |
+| `--model` | Strong model override | auto per provider |
+| `--model-light` | Cheaper model (same provider) for low-stakes agents; enables tiered execution | — (single model) |
+| `--light-agents` | Override which agents use `--model-light` | secrets, deps, fingerprint |
 | `--api-key` | API key override | env var |
 | `--ollama-host` | Ollama server URL | `localhost:11434` |
 | `--scope` | `full`, `quick`, `secrets_only`, `deps_only` | `full` |
 | `--severity-threshold` | `critical`, `high`, `medium`, `low`, `info` | `low` |
 | `--skip` | Agents to skip: `static`, `secrets`, `deps`, `triage`, `fingerprint`, `validation` | none |
 | `--validate` | Enable active exploit testing (AFP + A7) | off |
-| `--safe-only` | Non-destructive PoCs only | `true` |
+| `--safe-only` / `--no-safe-only` | Non-destructive PoCs only; `--no-safe-only` permits destructive tests | `true` |
 | `--base-url` | Running app URL (required with `--validate`) | — |
 | `--tokens` | Auth tokens for validation | — |
 | `--creds` | Credentials for validation (`user:pass`) | — |
@@ -115,6 +117,36 @@ A1 feeds every downstream agent. A2/A3/A4 run independently and produce findings
 | Best for | Full scans, large repos | Full scans | Quick scans, small repos |
 
 Agentic providers (Claude, OpenAI) iteratively explore the codebase — read a file, decide what to read next, run commands. Ollama runs in single-shot mode where Nomad pre-reads source files and injects them into the prompt context.
+
+## Model Tiering (token optimization)
+
+By default every agent uses one model (`--model`). To cut token cost, route the
+reasoning-light agents to a cheaper model and reserve the strong model for the
+agents that actually need deep reasoning.
+
+```bash
+# Claude: deep reasoning on Opus, bulk validation of tool output on Haiku
+python3 nomad --repo /path/to/app \
+  --model claude-opus-4-8 \
+  --model-light claude-haiku-4-5
+```
+
+- **Strong (default):** `recon`, `static`, `triage`, `validation` — map building, vulnerability hunting, correlation/CVSS, exploit crafting.
+- **Light (`--model-light`):** `secrets`, `deps`, `fingerprint` — these mainly validate the output of CLI tools (TruffleHog, Semgrep, npm/pip/osv audit, curl), so a smaller model is usually enough.
+
+Override the split with `--light-agents` (recon is allowed here):
+
+```bash
+# Maximum savings: also push the token-heavy recon pass onto the light model
+python3 nomad --repo /path/to/app \
+  --model claude-opus-4-8 --model-light claude-haiku-4-5 \
+  --light-agents secrets deps fingerprint recon
+```
+
+Notes:
+- `--model-light` must be the **same provider** as `--model`. Cross-provider tiering (e.g. bulk on local Ollama, validation on Claude) is not yet supported.
+- Both tiers are preflighted at startup (for Ollama, each model must be pulled).
+- Without `--model-light`, behaviour is unchanged: one model for all agents.
 
 ## Output Structure
 
@@ -142,7 +174,7 @@ output/
 ## Architecture
 
 ```
-nomad.py                          ← A0 Orchestrator + CLI entry point
+nomad                          ← A0 Orchestrator + CLI entry point
 ├── agents/
 │   ├── base.py                   ← BaseAgent (provider-agnostic contract)
 │   ├── recon.py                  ← A1 Recon
@@ -172,7 +204,7 @@ nomad.py                          ← A0 Orchestrator + CLI entry point
 
 ## Key Design Decisions
 
-**The orchestrator is code, not an LLM.** `nomad.py` uses `if` statements, not AI, for routing and decisions. This keeps the pipeline predictable and debuggable.
+**The orchestrator is code, not an LLM.** `nomad` uses `if` statements, not AI, for routing and decisions. This keeps the pipeline predictable and debuggable.
 
 **Agents communicate via JSON files.** No shared memory, no message passing. Each agent writes structured JSON output. The orchestrator reads it and injects relevant parts into the next agent's prompt.
 
@@ -194,5 +226,5 @@ nomad.py                          ← A0 Orchestrator + CLI entry point
 
 1. Create `agents/prompts/your_agent.md` (system prompt)
 2. Create `agents/your_agent.py` extending `BaseAgent`
-3. Wire it into `nomad.py`'s pipeline
+3. Wire it into `nomad`'s pipeline
 4. Add its skip key to the `valid_skips` set in `parse_args`

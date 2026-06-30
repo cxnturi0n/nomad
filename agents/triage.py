@@ -17,6 +17,7 @@ Outputs: findings_triaged.json
 
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -37,7 +38,7 @@ class TriageAgent(BaseAgent):
     description = "Triage & deduplication — merges, correlates, and CVSS-scores all findings"
     tools = "read_only"
     max_turns = 600
-    timeout = 6000  # 15 min
+    timeout = 6000  # 100 min
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner):
         super().__init__(config, output_dir, runner)
@@ -161,6 +162,15 @@ class TriageAgent(BaseAgent):
             all_chains.extend(batch.get("attack_chains", []))
             all_dedup.extend(batch.get("dedup_log", []))
 
+        # Deterministic cross-batch dedup. Each batch was triaged by an LLM that
+        # could not see the other batches, so the same finding split across
+        # batches survives as duplicates. Merge by (file, line, CWE) or title.
+        pre_dedup = len(all_findings)
+        all_findings = self._dedup_findings(all_findings)
+        cross_merged = pre_dedup - len(all_findings)
+        if cross_merged:
+            logger.info(f"[a6_triage] Cross-batch dedup merged {cross_merged} duplicate finding(s)")
+
         # Re-sort: chains first, then CVSS descending
         confidence_order = {"high": 0, "medium": 1, "low": 2}
         all_findings.sort(key=lambda f: (
@@ -192,8 +202,58 @@ class TriageAgent(BaseAgent):
                 "by_severity": by_severity,
                 "by_confidence": by_confidence,
                 "batches_used": len(batch_results),
+                "cross_batch_merged": cross_merged,
             },
         }
+
+    # ── Deterministic cross-batch dedup ──────────────────────────────────────
+
+    def _dedup_key(self, f: dict):
+        """Identity used to detect duplicate findings across batches."""
+        file = (f.get("file") or "").strip().lower()
+        cwe = f.get("cwe_id") or 0
+        if file:
+            return ("loc", file, f.get("line_start"), cwe)
+        title = re.sub(r"\s+", " ", (f.get("title") or "").strip().lower())[:80]
+        return ("title", title, cwe)
+
+    def _dedup_findings(self, findings: list) -> list:
+        kept: dict = {}
+        order: list = []
+        for f in findings:
+            key = self._dedup_key(f)
+            if key in kept:
+                self._merge_finding_into(kept[key], f)
+            else:
+                kept[key] = f
+                order.append(key)
+        return [kept[k] for k in order]
+
+    def _merge_finding_into(self, keep: dict, dup: dict) -> None:
+        """Fold duplicate `dup` into surviving finding `keep`, keeping worst-case rating."""
+        sev_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+        conf_rank = {"high": 2, "medium": 1, "low": 0}
+
+        if sev_rank.get(dup.get("severity"), 0) > sev_rank.get(keep.get("severity"), 0):
+            keep["severity"] = dup.get("severity", keep.get("severity"))
+        if conf_rank.get(dup.get("confidence"), 0) > conf_rank.get(keep.get("confidence"), 0):
+            keep["confidence"] = dup.get("confidence", keep.get("confidence"))
+        if (dup.get("cvss_score") or 0) > (keep.get("cvss_score") or 0):
+            keep["cvss_score"] = dup.get("cvss_score")
+            if dup.get("cvss_vector"):
+                keep["cvss_vector"] = dup.get("cvss_vector")
+
+        # Union provenance / reference lists.
+        for field in ("detection_sources", "original_ids", "references"):
+            merged = list(keep.get(field) or [])
+            for v in (dup.get(field) or []):
+                if v not in merged:
+                    merged.append(v)
+            if merged:
+                keep[field] = merged
+
+        if not keep.get("attack_chain") and dup.get("attack_chain"):
+            keep["attack_chain"] = dup.get("attack_chain")
 
     def get_system_prompt(self) -> str:
         return PROMPT_FILE.read_text()

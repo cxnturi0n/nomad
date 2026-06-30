@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nomad-audit"
+version = "0.1.0"
+description = "Provider-agnostic multi-agent source code security audit pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "cxnturi0n" }]
+keywords = ["security", "sast", "pentest", "llm", "agents", "code-review"]
+# Core has no required runtime dependencies (stdlib only).
+dependencies = []
+
+[project.optional-dependencies]
+# OpenAI API fallback mode (when the `codex` CLI is not installed).
+openai = ["openai>=1.40.0"]
+# Convenience: pip-installable security tools the agents shell out to.
+tools = ["semgrep", "pip-audit"]
+
+[tool.setuptools]
+packages = ["agents", "models", "utils", "utils.runners"]
+
+[tool.setuptools.package-data]
+agents = ["prompts/*.md"]

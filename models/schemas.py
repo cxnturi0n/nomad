@@ -1,6 +1,14 @@
 """
 Shared data models for the multi-agent source code review pipeline.
-Every agent reads/writes these structures — they are the contract.
+
+NOTE ON THE CONTRACT: the runtime contract between agents is the JSON shape
+defined in each agent's prompt (agents/prompts/*.md) and normalized in that
+agent's parse_output(). EngagementConfig, AgentRun, ScanMode, RiskLevel and
+AgentStatus (below) ARE used by the orchestrator and agents. The recon/finding
+dataclasses (ReconReport, ModuleInfo, EntryPoint, DataFlow, TrustBoundary,
+AuthMechanism, ThirdPartyIntegration) and the to_json/save_json/load_recon_report
+helpers are reference/documentation only — they are NOT currently used for
+(de)serialization and their field names may differ from the live JSON.
 """
 
 from __future__ import annotations
@@ -116,7 +124,9 @@ class ReconReport:
 class EngagementConfig:
     repo_path: str
     provider: str = "claude"       # AI provider: claude, openai, ollama
-    model: str = ""                # model override (empty = provider default)
+    model: str = ""                # strong model override (empty = provider default)
+    model_light: str = ""          # cheaper model (same provider) for low-stakes agents
+    light_agents: list[str] = field(default_factory=list)  # agents that use model_light
     api_key: str = ""              # API key override (providers read env by default)
     base_url: str = ""
     tokens: list[str] = field(default_factory=list)
