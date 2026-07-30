@@ -23,7 +23,11 @@ from pathlib import Path
 from typing import Optional
 
 from agents.base import BaseAgent
-from models.schemas import EngagementConfig, AgentRun, AgentStatus
+from models.schemas import (
+    EngagementConfig, AgentRun, AgentStatus,
+    SCHEMA_STR, SCHEMA_STR_ARRAY, SCHEMA_STR_NULL, SCHEMA_INT_NULL, SCHEMA_INT,
+    SCHEMA_NUMBER, SCHEMA_SEVERITY, SCHEMA_CONFIDENCE,
+)
 from utils.runners.base import BaseRunner, RunResult
 
 logger = logging.getLogger("nomad.agents.triage")
@@ -32,6 +36,79 @@ PROMPT_FILE = Path(__file__).parent / "prompts" / "triage.md"
 
 BATCH_SIZE = 40  # max findings per triage call
 
+# JSON Schema for `claude --json-schema` (structured output). Mirrors the shapes
+# normalized in _validate_findings / _validate_chains. Unlike the discovery
+# agents, `id` is KEPT here so the model's cross-references stay coherent —
+# finding.attack_chain points at a chain id, and chain.finding_ids point back at
+# finding ids. CLI-strict: closed objects, all properties required, nullable via
+# ["type","null"]. `cwe_id` is a string the parser coerces to int.
+TRIAGE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["findings", "attack_chains", "dedup_log", "summary"],
+    "properties": {
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "id", "title", "severity", "confidence", "cvss_score",
+                    "cvss_vector", "cwe_id", "cwe_name", "file", "line_start",
+                    "line_end", "description", "attack_scenario", "remediation",
+                    "detection_sources", "original_ids", "attack_chain", "references",
+                ],
+                "properties": {
+                    "id": SCHEMA_STR, "title": SCHEMA_STR, "severity": SCHEMA_SEVERITY,
+                    "confidence": SCHEMA_CONFIDENCE, "cvss_score": SCHEMA_NUMBER,
+                    "cvss_vector": SCHEMA_STR, "cwe_id": SCHEMA_STR,
+                    "cwe_name": SCHEMA_STR, "file": SCHEMA_STR,
+                    "line_start": SCHEMA_INT_NULL, "line_end": SCHEMA_INT_NULL,
+                    "description": SCHEMA_STR, "attack_scenario": SCHEMA_STR,
+                    "remediation": SCHEMA_STR, "detection_sources": SCHEMA_STR_ARRAY,
+                    "original_ids": SCHEMA_STR_ARRAY, "attack_chain": SCHEMA_STR_NULL,
+                    "references": SCHEMA_STR_ARRAY,
+                },
+            },
+        },
+        "attack_chains": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["id", "title", "severity", "cvss_score",
+                             "description", "finding_ids", "combined_impact"],
+                "properties": {
+                    "id": SCHEMA_STR, "title": SCHEMA_STR, "severity": SCHEMA_SEVERITY,
+                    "cvss_score": SCHEMA_NUMBER, "description": SCHEMA_STR,
+                    "finding_ids": SCHEMA_STR_ARRAY, "combined_impact": SCHEMA_STR,
+                },
+            },
+        },
+        "dedup_log": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["merged_into", "original_ids", "reason"],
+                "properties": {
+                    "merged_into": SCHEMA_STR, "original_ids": SCHEMA_STR_ARRAY,
+                    "reason": SCHEMA_STR,
+                },
+            },
+        },
+        "summary": {
+            "type": "object", "additionalProperties": False,
+            "required": ["total_input_findings", "duplicates_removed",
+                         "total_output_findings", "attack_chains_identified"],
+            "properties": {
+                "total_input_findings": SCHEMA_INT, "duplicates_removed": SCHEMA_INT,
+                "total_output_findings": SCHEMA_INT, "attack_chains_identified": SCHEMA_INT,
+            },
+        },
+    },
+}
+
 
 class TriageAgent(BaseAgent):
     name = "a6_triage"
@@ -39,6 +116,7 @@ class TriageAgent(BaseAgent):
     tools = "read_only"
     max_turns = 600
     timeout = 6000  # 100 min
+    output_schema = TRIAGE_OUTPUT_SCHEMA
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner):
         super().__init__(config, output_dir, runner)
@@ -109,6 +187,7 @@ class TriageAgent(BaseAgent):
                 max_turns=self.max_turns,
                 timeout=self.timeout,
                 verbose=self.config.verbose,
+                output_schema=self.output_schema if self._use_structured() else None,
             )
 
             if result.success and result.parsed_json:
@@ -148,28 +227,68 @@ class TriageAgent(BaseAgent):
         return run
 
     def _merge_batches(self, batch_results: list[dict], total_input: int) -> dict:
-        """Merge results from multiple triage batches."""
+        """Merge results from multiple triage batches.
+
+        Findings and chains are renumbered into a single global id space, then
+        deduped and re-sorted. Because finding.attack_chain and chain.finding_ids
+        are cross-references, every renumber/dedup/sort step remaps them in
+        lockstep so the links in the merged report stay coherent.
+        """
         all_findings = []
         all_chains = []
         all_dedup = []
         counter = 0
+        chain_counter = 0
 
         for batch in batch_results:
-            for f in batch.get("findings", []):
+            batch_findings = batch.get("findings", [])
+
+            # Renumber findings into the global id space, tracking batch-local ->
+            # global so this batch's chain cross-refs can follow.
+            fid_map = {}
+            for f in batch_findings:
                 counter += 1
-                f["id"] = f"TRIAGE-{counter:03d}"
+                gid = f"TRIAGE-{counter:03d}"
+                old = f.get("id")
+                if old:
+                    fid_map[old] = gid
+                f["id"] = gid
                 all_findings.append(f)
-            all_chains.extend(batch.get("attack_chains", []))
+
+            # Renumber chains too (batch-local chain ids collide across batches),
+            # and repoint their finding_ids at the global finding ids.
+            cid_map = {}
+            for chain in batch.get("attack_chains", []):
+                chain_counter += 1
+                gcid = f"CHAIN-{chain_counter:03d}"
+                oldc = chain.get("id")
+                if oldc:
+                    cid_map[oldc] = gcid
+                chain["id"] = gcid
+                chain["finding_ids"] = [fid_map.get(x, x) for x in chain.get("finding_ids", [])]
+                all_chains.append(chain)
+
+            # Repoint each finding's attack_chain at the global chain id.
+            for f in batch_findings:
+                ac = f.get("attack_chain")
+                if ac in cid_map:
+                    f["attack_chain"] = cid_map[ac]
+
             all_dedup.extend(batch.get("dedup_log", []))
 
         # Deterministic cross-batch dedup. Each batch was triaged by an LLM that
         # could not see the other batches, so the same finding split across
         # batches survives as duplicates. Merge by (file, line, CWE) or title.
         pre_dedup = len(all_findings)
-        all_findings = self._dedup_findings(all_findings)
+        all_findings, dedup_remap = self._dedup_findings(all_findings)
         cross_merged = pre_dedup - len(all_findings)
         if cross_merged:
             logger.info(f"[a6_triage] Cross-batch dedup merged {cross_merged} duplicate finding(s)")
+
+        # A merged-away finding's id must redirect to its survivor in every chain.
+        if dedup_remap:
+            for chain in all_chains:
+                chain["finding_ids"] = [dedup_remap.get(x, x) for x in chain.get("finding_ids", [])]
 
         # Re-sort: chains first, then CVSS descending
         confidence_order = {"high": 0, "medium": 1, "low": 2}
@@ -179,9 +298,16 @@ class TriageAgent(BaseAgent):
             confidence_order.get(f.get("confidence", "medium"), 1),
         ))
 
-        # Re-number after sort
+        # Re-number after sort, remapping chain cross-refs to the final ids.
+        final_map = {}
         for i, f in enumerate(all_findings):
-            f["id"] = f"TRIAGE-{i + 1:03d}"
+            new_id = f"TRIAGE-{i + 1:03d}"
+            old = f.get("id")
+            if old:
+                final_map[old] = new_id
+            f["id"] = new_id
+        for chain in all_chains:
+            chain["finding_ids"] = [final_map.get(x, x) for x in chain.get("finding_ids", [])]
 
         # Build summary
         by_severity = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
@@ -217,17 +343,27 @@ class TriageAgent(BaseAgent):
         title = re.sub(r"\s+", " ", (f.get("title") or "").strip().lower())[:80]
         return ("title", title, cwe)
 
-    def _dedup_findings(self, findings: list) -> list:
+    def _dedup_findings(self, findings: list) -> tuple[list, dict]:
+        """Collapse duplicate findings.
+
+        Returns (deduped, remap) where remap maps each merged-away finding id to
+        the id of the survivor it folded into, so callers can redirect any
+        cross-reference that pointed at the dropped finding.
+        """
         kept: dict = {}
         order: list = []
+        remap: dict = {}
         for f in findings:
             key = self._dedup_key(f)
             if key in kept:
-                self._merge_finding_into(kept[key], f)
+                survivor = kept[key]
+                self._merge_finding_into(survivor, f)
+                if f.get("id") and survivor.get("id"):
+                    remap[f["id"]] = survivor["id"]
             else:
                 kept[key] = f
                 order.append(key)
-        return [kept[k] for k in order]
+        return [kept[k] for k in order], remap
 
     def _merge_finding_into(self, keep: dict, dup: dict) -> None:
         """Fold duplicate `dup` into surviving finding `keep`, keeping worst-case rating."""

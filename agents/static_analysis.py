@@ -34,6 +34,58 @@ _SAST_CONFIGS = [
     "p/sql-injection", "p/xss", "p/insecure-transport", "p/default",
 ]
 
+# JSON Schema for `claude --json-schema` (structured output pilot). Shaped to the
+# CLI's strict semantics — every property listed in `required`, additionalProperties
+# false — but kept non-lossy: fields the model can't fill get "" / null / [] rather
+# than forcing it to drop the finding, and a free-text `notes` acts as an escape
+# hatch for anything that doesn't fit a field. parse_output() normalizes the rest
+# (cwe string→int, bad enums→medium), so this only guarantees SHAPE, not values.
+STATIC_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["findings", "summary"],
+    "properties": {
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "title", "cwe_id", "cwe_name", "severity", "confidence",
+                    "file", "line_start", "line_end", "code_snippet",
+                    "description", "attack_scenario", "remediation",
+                    "references", "notes",
+                ],
+                "properties": {
+                    "title": {"type": "string"},
+                    "cwe_id": {"type": "string"},          # "CWE-89" or "" — parser coerces to int
+                    "cwe_name": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
+                    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "file": {"type": "string"},
+                    "line_start": {"type": ["integer", "null"]},
+                    "line_end": {"type": ["integer", "null"]},
+                    "code_snippet": {"type": "string"},
+                    "description": {"type": "string"},
+                    "attack_scenario": {"type": "string"},
+                    "remediation": {"type": "string"},
+                    "references": {"type": "array", "items": {"type": "string"}},
+                    "notes": {"type": "string"},           # escape hatch for anything off-schema
+                },
+            },
+        },
+        "summary": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["files_analyzed", "scope_notes"],
+            "properties": {
+                "files_analyzed": {"type": "array", "items": {"type": "string"}},
+                "scope_notes": {"type": "string"},
+            },
+        },
+    },
+}
+
 
 def run_semgrep_sast(repo_path: str, timeout: int = 300) -> list:
     """Run Semgrep SAST rulesets once; return raw results (or [] if unavailable)."""
@@ -66,6 +118,7 @@ class StaticAnalysisAgent(BaseAgent):
     tools = "read_only"
     max_turns = 75  # may need many turns for thorough analysis
     timeout = 6000   # 100 min — deep analysis of large modules can take a long time
+    output_schema = STATIC_OUTPUT_SCHEMA  # pilot agent for --structured-output
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner,
                  scope_name: str = "full"):
@@ -324,6 +377,13 @@ No markdown, no prose — just valid JSON starting with {{ and ending with }}.""
                 # Handle "CWE-89" format
                 cwe_id = int(cwe_id.replace("CWE-", "").replace("cwe-", "")) if cwe_id.replace("CWE-", "").replace("cwe-", "").isdigit() else 0
 
+            # Fold the structured-mode `notes` escape hatch into description so
+            # off-schema detail the model parked there is never silently lost.
+            description = f.get("description", "")
+            notes = f.get("notes", "")
+            if isinstance(notes, str) and notes.strip():
+                description = f"{description}\n\n[notes] {notes}".strip() if description else notes.strip()
+
             valid.append({
                 "id": fid,
                 "title": f.get("title", "Untitled finding"),
@@ -335,7 +395,7 @@ No markdown, no prose — just valid JSON starting with {{ and ending with }}.""
                 "line_start": f.get("line_start", f.get("line", None)),
                 "line_end": f.get("line_end", f.get("line", None)),
                 "code_snippet": f.get("code_snippet", ""),
-                "description": f.get("description", ""),
+                "description": description,
                 "attack_scenario": f.get("attack_scenario", ""),
                 "remediation": f.get("remediation", ""),
                 "references": f.get("references", []),

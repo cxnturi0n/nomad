@@ -21,12 +21,74 @@ from pathlib import Path
 from typing import Optional
 
 from agents.base import BaseAgent
-from models.schemas import EngagementConfig
+from models.schemas import (
+    EngagementConfig,
+    SCHEMA_STR, SCHEMA_STR_ARRAY, SCHEMA_NUMBER, SCHEMA_BOOL, SCHEMA_INT,
+    SCHEMA_SEVERITY, SCHEMA_CONFIDENCE,
+)
 from utils.runners.base import BaseRunner, RunResult
 
 logger = logging.getLogger("nomad.agents.deps")
 
 PROMPT_FILE = Path(__file__).parent / "prompts" / "dependency_audit.md"
+
+# JSON Schema for `claude --json-schema` (structured output). Mirrors the finding
+# shape normalized in _validate_findings. CLI-strict: closed objects, all
+# properties required, nullable via ["type","null"]. `id` is omitted (parser
+# assigns DEP-NNN); `cwe_id` is a string the parser coerces to int; `notes` is a
+# free-text escape hatch folded into description. tool_results is omitted — the
+# parser rebuilds it from the actual audit-tool runs.
+DEPS_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["findings", "dependency_overview", "summary"],
+    "properties": {
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "title", "package_name", "package_version", "ecosystem",
+                    "is_direct", "severity", "confidence", "cve_ids", "cvss_score",
+                    "cvss_vector", "cwe_id", "cwe_name", "vulnerable_range",
+                    "fix_version", "transitive_chain", "usage_in_codebase",
+                    "description", "remediation", "detection_source", "notes",
+                ],
+                "properties": {
+                    "title": SCHEMA_STR, "package_name": SCHEMA_STR,
+                    "package_version": SCHEMA_STR, "ecosystem": SCHEMA_STR,
+                    "is_direct": SCHEMA_BOOL, "severity": SCHEMA_SEVERITY,
+                    "confidence": SCHEMA_CONFIDENCE, "cve_ids": SCHEMA_STR_ARRAY,
+                    "cvss_score": SCHEMA_NUMBER, "cvss_vector": SCHEMA_STR,
+                    "cwe_id": SCHEMA_STR, "cwe_name": SCHEMA_STR,
+                    "vulnerable_range": SCHEMA_STR, "fix_version": SCHEMA_STR,
+                    "transitive_chain": SCHEMA_STR, "usage_in_codebase": SCHEMA_STR,
+                    "description": SCHEMA_STR, "remediation": SCHEMA_STR,
+                    "detection_source": SCHEMA_STR, "notes": SCHEMA_STR,
+                },
+            },
+        },
+        "dependency_overview": {
+            "type": "object", "additionalProperties": False,
+            "required": ["ecosystem", "total_direct", "total_transitive",
+                         "lockfile_present", "version_pinning", "manifest_files"],
+            "properties": {
+                "ecosystem": SCHEMA_STR, "total_direct": SCHEMA_INT,
+                "total_transitive": SCHEMA_INT, "lockfile_present": SCHEMA_BOOL,
+                "version_pinning": SCHEMA_STR, "manifest_files": SCHEMA_STR_ARRAY,
+            },
+        },
+        "summary": {
+            "type": "object", "additionalProperties": False,
+            "required": ["packages_analyzed", "files_analyzed", "scope_notes"],
+            "properties": {
+                "packages_analyzed": SCHEMA_INT, "files_analyzed": SCHEMA_STR_ARRAY,
+                "scope_notes": SCHEMA_STR,
+            },
+        },
+    },
+}
 
 
 # ── Ecosystem Detection ──────────────────────────────────────────────────────
@@ -381,6 +443,7 @@ class DependencyAuditAgent(BaseAgent):
     tools = "read_only"
     max_turns = 200
     timeout = 6000
+    output_schema = DEPS_OUTPUT_SCHEMA
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner):
         super().__init__(config, output_dir, runner)
@@ -557,6 +620,13 @@ class DependencyAuditAgent(BaseAgent):
                 except ValueError:
                     cvss = 0.0
 
+            # Fold the structured-mode `notes` escape hatch into description so
+            # off-schema detail the model parked there is never silently lost.
+            description = f.get("description", "")
+            notes = f.get("notes", "")
+            if isinstance(notes, str) and notes.strip():
+                description = f"{description}\n\n[notes] {notes}".strip() if description else notes.strip()
+
             valid.append({
                 "id": fid,
                 "title": f.get("title", f"Vulnerability in {f.get('package_name', 'unknown')}"),
@@ -575,7 +645,7 @@ class DependencyAuditAgent(BaseAgent):
                 "fix_version": f.get("fix_version", ""),
                 "transitive_chain": f.get("transitive_chain", ""),
                 "usage_in_codebase": f.get("usage_in_codebase", ""),
-                "description": f.get("description", ""),
+                "description": description,
                 "remediation": f.get("remediation", ""),
                 "detection_source": f.get("detection_source", "manual"),
             })

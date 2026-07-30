@@ -49,6 +49,10 @@ class BaseAgent(ABC):
     tools: str = "read_only"  # semantic preset from TOOL_PRESETS
     max_turns: int = 30
     timeout: int = 1200
+    # JSON Schema for provider-native structured output. When set AND the runner
+    # supports it AND config.structured_output is on, the final output is
+    # schema-constrained (no text parse/repair). None = classic free-text + extract.
+    output_schema: Optional[dict] = None
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner):
         self.config = config
@@ -75,6 +79,15 @@ class BaseAgent(ABC):
     def output_file(self) -> Path:
         return self.output_dir / f"{self.name}_output.json"
 
+    def _use_structured(self) -> bool:
+        """Structured output is active only when all three line up: the agent
+        defines a schema, the runner can honor it, and the user opted in."""
+        return (
+            self.output_schema is not None
+            and getattr(self.runner, "supports_structured_output", False)
+            and getattr(self.config, "structured_output", False)
+        )
+
     def run(self, context: Optional[dict] = None) -> AgentRun:
         """Execute the agent via the runner. Returns an AgentRun tracking object."""
         run = AgentRun(
@@ -93,6 +106,10 @@ class BaseAgent(ABC):
                 system_prompt += CAVEMAN_DIRECTIVE
             task_prompt = self.get_task_prompt(context)
 
+            use_structured = self._use_structured()
+            if use_structured:
+                logger.info(f"[{self.name}] Structured output ON (schema-constrained emit, no JSON repair)")
+
             result = self.runner.run(
                 system_prompt=system_prompt,
                 task_prompt=task_prompt,
@@ -101,6 +118,7 @@ class BaseAgent(ABC):
                 max_turns=self.max_turns,
                 timeout=self.timeout,
                 verbose=self.config.verbose,
+                output_schema=self.output_schema if use_structured else None,
             )
 
             run.duration_seconds = time.time() - start

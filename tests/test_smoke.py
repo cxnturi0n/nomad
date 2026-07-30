@@ -6,6 +6,7 @@ Run:
 """
 
 import importlib.util
+import json
 import pathlib
 import subprocess
 import sys
@@ -242,12 +243,63 @@ class TestTriageDedup(unittest.TestCase):
              "severity": "critical", "cvss_score": 9.0, "original_ids": ["SEC-2"]},
             {"title": "XSS", "file": "view.py", "line_start": 5, "cwe_id": 79, "severity": "medium"},
         ]
-        out = agent._dedup_findings(findings)
+        out, remap = agent._dedup_findings(findings)
         self.assertEqual(len(out), 2)                      # first two merged
         merged = out[0]
         self.assertEqual(merged["severity"], "critical")    # worst-case kept
         self.assertEqual(merged["cvss_score"], 9.0)
         self.assertEqual(set(merged["original_ids"]), {"VULN-1", "SEC-2"})
+        # remap has no ids here (findings carry no "id"); it stays empty
+        self.assertEqual(remap, {})
+
+    def test_merge_batches_keeps_chain_cross_refs_coherent(self):
+        # Renumber + cross-batch dedup + sort must not leave attack_chains
+        # pointing at stale/dangling finding ids. Batch-local ids collide across
+        # batches, and a duplicate is merged away — every path must remap.
+        agent = self._agent()
+        batch1 = {
+            "findings": [
+                {"id": "TRIAGE-001", "title": "SQLi", "file": "a.py", "line_start": 10,
+                 "cwe_id": 89, "cvss_score": 9.8, "severity": "critical",
+                 "confidence": "high", "attack_chain": "CHAIN-1"},
+                {"id": "TRIAGE-002", "title": "XSS", "file": "b.py", "line_start": 20,
+                 "cwe_id": 79, "cvss_score": 6.1, "severity": "medium",
+                 "confidence": "medium", "attack_chain": "CHAIN-1"},
+            ],
+            "attack_chains": [{"id": "CHAIN-1", "title": "c1", "severity": "critical",
+                               "cvss_score": 9.8, "description": "",
+                               "finding_ids": ["TRIAGE-001", "TRIAGE-002"], "combined_impact": ""}],
+            "dedup_log": [],
+        }
+        batch2 = {
+            "findings": [
+                # duplicate of batch1 SQLi (same file/line/cwe) -> merged away
+                {"id": "TRIAGE-001", "title": "SQLi dup", "file": "a.py", "line_start": 10,
+                 "cwe_id": 89, "cvss_score": 9.8, "severity": "critical",
+                 "confidence": "high", "attack_chain": "CHAIN-1"},
+                {"id": "TRIAGE-002", "title": "SSRF", "file": "c.py", "line_start": 30,
+                 "cwe_id": 918, "cvss_score": 8.6, "severity": "high",
+                 "confidence": "high", "attack_chain": "CHAIN-1"},
+            ],
+            "attack_chains": [{"id": "CHAIN-1", "title": "c2", "severity": "high",
+                               "cvss_score": 8.6, "description": "",
+                               "finding_ids": ["TRIAGE-001", "TRIAGE-002"], "combined_impact": ""}],
+            "dedup_log": [],
+        }
+        merged = agent._merge_batches([batch1, batch2], total_input=4)
+
+        fids = {f["id"] for f in merged["findings"]}
+        cids = [c["id"] for c in merged["attack_chains"]]
+        # chain ids are globally unique (batch-local collision resolved)
+        self.assertEqual(len(cids), len(set(cids)))
+        # no chain references a nonexistent finding
+        for c in merged["attack_chains"]:
+            for ref in c["finding_ids"]:
+                self.assertIn(ref, fids, f"dangling finding ref {ref} in {c['id']}")
+        # every finding.attack_chain resolves to a real chain
+        for f in merged["findings"]:
+            if f.get("attack_chain"):
+                self.assertIn(f["attack_chain"], set(cids))
 
 
 class TestEffort(unittest.TestCase):
@@ -265,6 +317,175 @@ class TestOsvCount(unittest.TestCase):
         ]}
         # old packages[0]-only logic would have returned 3
         self.assertEqual(_count_osv_vulns(data), 4)
+
+
+class SupportingStubRunner(StubRunner):
+    """A stub that claims structured-output support (for gating tests)."""
+    supports_structured_output = True
+
+
+class TestStructuredOutput(unittest.TestCase):
+    def _claude(self):
+        from utils.runners.claude import ClaudeRunner
+        return ClaudeRunner()
+
+    def test_config_default_off(self):
+        self.assertFalse(EngagementConfig(repo_path="/tmp").structured_output)
+
+    def test_capability_flags(self):
+        from utils.runners.claude import ClaudeRunner
+        from utils.runners.openai import OpenAIRunner
+        from utils.runners.ollama import OllamaRunner
+        self.assertTrue(ClaudeRunner().supports_structured_output)
+        self.assertFalse(OpenAIRunner().supports_structured_output)
+        self.assertFalse(OllamaRunner().supports_structured_output)
+
+    def test_parse_prefers_structured_output_object(self):
+        # structured_output must win over the (deliberately bogus) result text.
+        raw = json.dumps({
+            "type": "result",
+            "result": "not json at all",
+            "structured_output": {"findings": [{"title": "x"}], "summary": {}},
+            "total_cost_usd": 0.02,
+        })
+        parsed, cost = self._claude()._parse_output(raw)
+        self.assertEqual(parsed, {"findings": [{"title": "x"}], "summary": {}})
+        self.assertEqual(cost, 0.02)
+
+    def test_parse_structured_output_in_event_array(self):
+        raw = json.dumps([
+            {"type": "system"},
+            {"type": "result", "result": "nope", "structured_output": {"a": 1}, "total_cost_usd": 0.03},
+        ])
+        parsed, cost = self._claude()._parse_output(raw)
+        self.assertEqual(parsed, {"a": 1})
+        self.assertEqual(cost, 0.03)
+
+    def test_parse_falls_back_to_text_without_structured(self):
+        raw = json.dumps({"type": "result", "result": '{"findings": []}', "total_cost_usd": 0.01})
+        parsed, cost = self._claude()._parse_output(raw)
+        self.assertEqual(parsed, {"findings": []})
+        self.assertEqual(cost, 0.01)
+
+    def test_empty_structured_output_ignored(self):
+        # An empty {} structured_output should not shadow real result text.
+        raw = json.dumps({"type": "result", "result": '{"findings": [{"title": "y"}]}',
+                          "structured_output": {}, "total_cost_usd": 0.0})
+        parsed, _ = self._claude()._parse_output(raw)
+        self.assertEqual(parsed, {"findings": [{"title": "y"}]})
+
+    def test_static_agent_declares_schema(self):
+        from agents.static_analysis import StaticAnalysisAgent, STATIC_OUTPUT_SCHEMA
+        self.assertIs(StaticAnalysisAgent.output_schema, STATIC_OUTPUT_SCHEMA)
+        # strict-mode shape the CLI requires
+        self.assertEqual(STATIC_OUTPUT_SCHEMA["additionalProperties"], False)
+        item = STATIC_OUTPUT_SCHEMA["properties"]["findings"]["items"]
+        self.assertEqual(item["additionalProperties"], False)
+        # every property is required (strict), and the escape hatch exists
+        self.assertEqual(set(item["required"]), set(item["properties"].keys()))
+        self.assertIn("notes", item["properties"])
+
+    def _static_agent(self, runner, structured):
+        from agents.static_analysis import StaticAnalysisAgent
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        cfg = EngagementConfig(repo_path=str(tmp), structured_output=structured)
+        return StaticAnalysisAgent(cfg, tmp / "a2", runner)
+
+    def test_use_structured_requires_all_three(self):
+        # all aligned -> on
+        self.assertTrue(self._static_agent(SupportingStubRunner(), True)._use_structured())
+        # runner can't -> off
+        self.assertFalse(self._static_agent(StubRunner(), True)._use_structured())
+        # user opted out -> off
+        self.assertFalse(self._static_agent(SupportingStubRunner(), False)._use_structured())
+
+    def test_use_structured_off_when_agent_has_no_schema(self):
+        # An agent that declares no output_schema must never use structured mode,
+        # even when the runner supports it and the user opted in.
+        from agents.base import BaseAgent
+
+        class _NoSchemaAgent(BaseAgent):
+            name = "no_schema"
+            output_schema = None
+
+            def get_system_prompt(self):
+                return ""
+
+            def get_task_prompt(self, context=None):
+                return ""
+
+            def parse_output(self, result):
+                return {}
+
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        cfg = EngagementConfig(repo_path=str(tmp), structured_output=True)
+        agent = _NoSchemaAgent(cfg, tmp / "noschema", SupportingStubRunner())
+        self.assertIsNone(agent.output_schema)
+        self.assertFalse(agent._use_structured())
+
+    def test_notes_folded_into_description(self):
+        agent = self._static_agent(SupportingStubRunner(), True)
+        rr = RunResult(success=True, parsed_json={"findings": [
+            {"title": "T", "description": "base desc", "notes": "extra context"},
+        ]})
+        out = agent.parse_output(rr)
+        desc = out["findings"][0]["description"]
+        self.assertIn("base desc", desc)
+        self.assertIn("extra context", desc)
+
+    def test_help_exposes_structured_flags(self):
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "nomad"), "--help"],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertIn("--structured-output", proc.stdout)
+        self.assertIn("--no-structured-output", proc.stdout)
+
+    def test_all_agents_declare_strict_schema(self):
+        # Every pipeline agent now defines a strict, CLI-compatible output_schema.
+        from agents.recon import ReconAgent
+        from agents.static_analysis import StaticAnalysisAgent
+        from agents.secrets import SecretsAgent
+        from agents.dependency_audit import DependencyAuditAgent
+        from agents.triage import TriageAgent
+        from agents.fingerprint import FingerprintAgent
+        from agents.validation import ValidationAgent
+
+        def assert_strict(node, path):
+            if isinstance(node, dict):
+                if node.get("type") == "object" and "properties" in node:
+                    self.assertIs(node.get("additionalProperties"), False, path)
+                    self.assertEqual(set(node["properties"]), set(node.get("required", [])), path)
+                    for k, v in node["properties"].items():
+                        assert_strict(v, f"{path}.{k}")
+                elif node.get("type") == "array":
+                    assert_strict(node.get("items", {}), f"{path}[]")
+
+        for cls in (ReconAgent, StaticAnalysisAgent, SecretsAgent, DependencyAuditAgent,
+                    TriageAgent, FingerprintAgent, ValidationAgent):
+            self.assertIsNotNone(cls.output_schema, cls.__name__)
+            json.dumps(cls.output_schema)  # must be serializable for --json-schema
+            assert_strict(cls.output_schema, cls.__name__)
+
+    def test_structured_default_on_for_claude_only(self):
+        # The provider decides the default: ON for claude, OFF for others,
+        # unless the user passes an explicit --structured-output/--no-... flag.
+        mod = _load_orchestrator()
+        tmp = tempfile.mkdtemp()
+
+        def parse(argv):
+            saved = sys.argv
+            sys.argv = ["nomad", "--repo", tmp, *argv]
+            try:
+                return mod.parse_args()
+            finally:
+                sys.argv = saved
+
+        self.assertTrue(parse([]).structured_output)                       # claude default
+        self.assertTrue(parse(["--provider", "claude"]).structured_output)
+        self.assertFalse(parse(["--provider", "ollama"]).structured_output)
+        self.assertFalse(parse(["--no-structured-output"]).structured_output)  # explicit off
+        self.assertTrue(parse(["--provider", "ollama", "--structured-output"]).structured_output)  # explicit on
 
 
 if __name__ == "__main__":

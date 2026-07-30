@@ -27,12 +27,81 @@ from pathlib import Path
 from typing import Optional
 
 from agents.base import BaseAgent
-from models.schemas import EngagementConfig
+from models.schemas import (
+    EngagementConfig,
+    SCHEMA_STR, SCHEMA_STR_ARRAY, SCHEMA_STR_NULL, SCHEMA_INT_NULL, SCHEMA_BOOL,
+)
 from utils.runners.base import BaseRunner, RunResult
 
 logger = logging.getLogger("nomad.agents.fingerprint")
 
 PROMPT_FILE = Path(__file__).parent / "prompts" / "fingerprint.md"
+
+# JSON Schema for `claude --json-schema` (structured output). Mirrors the 7-key
+# defense profile normalized in parse_output. CLI-strict: closed objects, all
+# properties required, nullable via ["type","null"]. waf.inspects (a free-form
+# {vector: bool} map) is intentionally omitted — its intel is already carried by
+# blocks_on / passes_through, and parse_output re-defaults inspects to {} so the
+# validation agent's guarded reader degrades cleanly.
+FINGERPRINT_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["server", "waf", "rate_limiting", "security_headers", "tls",
+                 "endpoints_discovered", "attack_surface_notes"],
+    "properties": {
+        "server": {
+            "type": "object", "additionalProperties": False,
+            "required": ["web_server", "framework", "language", "version"],
+            "properties": {
+                "web_server": SCHEMA_STR, "framework": SCHEMA_STR,
+                "language": SCHEMA_STR, "version": SCHEMA_STR,
+            },
+        },
+        "waf": {
+            "type": "object", "additionalProperties": False,
+            "required": ["detected", "vendor", "confidence", "evidence", "mode",
+                         "blocks_on", "passes_through", "bypass_hints"],
+            "properties": {
+                "detected": SCHEMA_BOOL, "vendor": SCHEMA_STR_NULL,
+                "confidence": {"type": "string", "enum": ["high", "medium", "low", "none"]},
+                "evidence": SCHEMA_STR, "mode": SCHEMA_STR,
+                "blocks_on": SCHEMA_STR_ARRAY, "passes_through": SCHEMA_STR_ARRAY,
+                "bypass_hints": SCHEMA_STR_ARRAY,
+            },
+        },
+        "rate_limiting": {
+            "type": "object", "additionalProperties": False,
+            "required": ["detected", "threshold", "window", "applies_to"],
+            "properties": {
+                "detected": SCHEMA_BOOL, "threshold": SCHEMA_STR_NULL,
+                "window": SCHEMA_STR_NULL, "applies_to": SCHEMA_STR_ARRAY,
+            },
+        },
+        "security_headers": {
+            "type": "object", "additionalProperties": False,
+            "required": ["present", "missing"],
+            "properties": {"present": SCHEMA_STR_ARRAY, "missing": SCHEMA_STR_ARRAY},
+        },
+        "tls": {
+            "type": "object", "additionalProperties": False,
+            "required": ["https_enabled", "tls_version"],
+            "properties": {"https_enabled": SCHEMA_BOOL, "tls_version": SCHEMA_STR_NULL},
+        },
+        "endpoints_discovered": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["path", "methods", "status_code", "auth_required", "notes"],
+                "properties": {
+                    "path": SCHEMA_STR, "methods": SCHEMA_STR_ARRAY,
+                    "status_code": SCHEMA_INT_NULL, "auth_required": SCHEMA_BOOL,
+                    "notes": SCHEMA_STR,
+                },
+            },
+        },
+        "attack_surface_notes": SCHEMA_STR_ARRAY,
+    },
+}
 
 
 class FingerprintAgent(BaseAgent):
@@ -41,6 +110,7 @@ class FingerprintAgent(BaseAgent):
     tools = "full"  # needs bash for curl + network egress to the target
     max_turns = 600
     timeout = 6000  # 100 min — many sequential curl calls
+    output_schema = FINGERPRINT_OUTPUT_SCHEMA
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner):
         super().__init__(config, output_dir, runner)

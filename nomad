@@ -139,6 +139,13 @@ Examples:
         help="Reasoning effort level (Claude provider only). Applied to BOTH model tiers.",
     )
     parser.add_argument(
+        "--structured-output", action=argparse.BooleanOptionalAction, default=None,
+        help="Provider-native schema-constrained output — eliminates JSON parse/repair by "
+             "forcing valid final objects (all agents). Default: ON for the Claude provider "
+             "(the only one that supports it), OFF otherwise. Use --no-structured-output to "
+             "force the classic free-text + extract path.",
+    )
+    parser.add_argument(
         "--api-key", default="",
         help="API key override (most providers read from env vars by default)",
     )
@@ -218,6 +225,12 @@ Examples:
     if args.light_agents and not args.model_light:
         parser.error("--light-agents requires --model-light")
 
+    # Resolve structured-output default: ON for Claude (only provider that can
+    # honor --json-schema), OFF elsewhere, unless the user set it explicitly.
+    structured_output = args.structured_output
+    if structured_output is None:
+        structured_output = (args.provider == "claude")
+
     return EngagementConfig(
         repo_path=str(repo_path),
         provider=args.provider,
@@ -225,6 +238,7 @@ Examples:
         model_light=args.model_light,
         light_agents=args.light_agents,
         effort=args.effort,
+        structured_output=structured_output,
         api_key=args.api_key,
         base_url=args.base_url,
         tokens=args.tokens,
@@ -538,6 +552,7 @@ class Pipeline:
             logger.info("Resumed from checkpoint — skipping")
         else:
             static_findings = []
+            static_failures = 0
             for partition in partitions:
                 scope_name = partition["scope_name"]
                 logger.info(f"Running static analysis on: {scope_name}")
@@ -561,8 +576,10 @@ class Pipeline:
                         findings = json.loads(a2.output_file.read_text())
                         static_findings.append(findings)
                     except (json.JSONDecodeError, FileNotFoundError) as e:
+                        static_failures += 1
                         logger.warning(f"Could not load findings from {scope_name}: {e}")
                 else:
+                    static_failures += 1
                     logger.warning(f"Static analysis failed for {scope_name}: {run.error}")
 
             if static_findings:
@@ -577,7 +594,16 @@ class Pipeline:
                     f"(critical={by_sev.get('critical', 0)}, high={by_sev.get('high', 0)}, "
                     f"medium={by_sev.get('medium', 0)}, low={by_sev.get('low', 0)})"
                 )
-                self._save_checkpoint("static")
+                # Only checkpoint when EVERY partition succeeded. A partial run
+                # must stay un-checkpointed so --resume re-runs the whole phase
+                # instead of caching incomplete analysis as complete.
+                if static_failures:
+                    logger.warning(
+                        f"{static_failures} of {len(partitions)} static partition(s) failed — "
+                        f"checkpoint NOT saved; --resume will re-run static analysis"
+                    )
+                else:
+                    self._save_checkpoint("static")
             else:
                 logger.warning("No static findings produced — checkpoint NOT saved")
 
@@ -899,6 +925,8 @@ class Pipeline:
             logger.info(f"  Light model:{self.light_runner.get_model_display()} → {', '.join(sorted(self.light_agents))}")
         if self.config.effort:
             logger.info(f"  Effort:     {self.config.effort}")
+        if self.config.structured_output:
+            logger.info("  Structured: ON (schema-constrained output; all agents)")
         logger.info(f"  Target:     {self.config.repo_path}")
         logger.info(f"  Scope:      {self.config.scope.value}")
         logger.info(f"  Validate:   {self.config.validate}")
@@ -1012,6 +1040,12 @@ def main():
         logger.error(f"Provider preflight failed:\n{msg}")
         sys.exit(1)
     logger.info(f"Provider ready: {msg}")
+
+    if config.structured_output and not getattr(runner, "supports_structured_output", False):
+        logger.warning(
+            f"--structured-output requested but provider '{config.provider}' can't honor it — "
+            "falling back to text parsing (no-op). Only the Claude provider supports it."
+        )
 
     if light_runner is not None:
         ok2, msg2 = light_runner.preflight()

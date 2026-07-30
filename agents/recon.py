@@ -19,7 +19,11 @@ from pathlib import Path
 from typing import Optional
 
 from agents.base import BaseAgent
-from models.schemas import EngagementConfig
+from models.schemas import (
+    EngagementConfig,
+    SCHEMA_STR, SCHEMA_STR_ARRAY, SCHEMA_STR_NULL, SCHEMA_INT_NULL,
+    SCHEMA_BOOL, SCHEMA_INT,
+)
 from utils.runners.base import BaseRunner, RunResult
 
 logger = logging.getLogger("nomad.agents.recon")
@@ -33,6 +37,129 @@ REQUIRED_KEYS = {
     "security_observations",
 }
 
+# JSON Schema for `claude --json-schema` (structured output). Mirrors the 10-key
+# contract in prompts/recon.md so a Claude runner can no longer emit a freestyle
+# schema — historically the #1 cause of recon parse failures (see
+# _map_freestyle_to_schema, which stays as the fallback for non-structured runs).
+# CLI-strict: closed objects, every property required, nullable via ["type","null"].
+# repo_stats.language_breakdown is intentionally omitted (free-form map, not
+# consumed downstream; parse_output re-defaults it).
+RECON_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "tech_stack", "entry_points", "auth", "data_flows", "trust_boundaries",
+        "critical_files", "modules", "third_party_integrations", "repo_stats",
+        "security_observations",
+    ],
+    "properties": {
+        "tech_stack": {
+            "type": "object", "additionalProperties": False,
+            "required": ["languages", "frameworks", "databases", "runtime",
+                         "package_manager", "containerized", "ci_cd", "iac"],
+            "properties": {
+                "languages": SCHEMA_STR_ARRAY, "frameworks": SCHEMA_STR_ARRAY,
+                "databases": SCHEMA_STR_ARRAY, "runtime": SCHEMA_STR,
+                "package_manager": SCHEMA_STR, "containerized": SCHEMA_BOOL,
+                "ci_cd": SCHEMA_STR_NULL, "iac": SCHEMA_STR_ARRAY,
+            },
+        },
+        "entry_points": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["type", "method", "path", "handler", "file",
+                             "line", "auth_required", "description"],
+                "properties": {
+                    "type": SCHEMA_STR, "method": SCHEMA_STR, "path": SCHEMA_STR,
+                    "handler": SCHEMA_STR, "file": SCHEMA_STR, "line": SCHEMA_INT_NULL,
+                    "auth_required": SCHEMA_BOOL, "description": SCHEMA_STR,
+                },
+            },
+        },
+        "auth": {
+            "type": "object", "additionalProperties": False,
+            "required": ["mechanisms", "session_store", "password_hashing",
+                         "mfa_supported", "authorization_model", "key_files", "notes"],
+            "properties": {
+                "mechanisms": SCHEMA_STR_ARRAY, "session_store": SCHEMA_STR_NULL,
+                "password_hashing": SCHEMA_STR_NULL, "mfa_supported": SCHEMA_BOOL,
+                "authorization_model": SCHEMA_STR, "key_files": SCHEMA_STR_ARRAY,
+                "notes": SCHEMA_STR,
+            },
+        },
+        "data_flows": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["name", "input_source", "validation", "processing",
+                             "storage", "output", "sanitization_notes"],
+                "properties": {
+                    "name": SCHEMA_STR, "input_source": SCHEMA_STR,
+                    "validation": SCHEMA_STR, "processing": SCHEMA_STR,
+                    "storage": SCHEMA_STR, "output": SCHEMA_STR,
+                    "sanitization_notes": SCHEMA_STR,
+                },
+            },
+        },
+        "trust_boundaries": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["boundary", "description", "enforcement"],
+                "properties": {
+                    "boundary": SCHEMA_STR, "description": SCHEMA_STR,
+                    "enforcement": SCHEMA_STR,
+                },
+            },
+        },
+        "critical_files": {
+            "type": "object", "additionalProperties": False,
+            "required": ["auth", "input_validation", "database", "crypto",
+                         "file_handling", "config", "middleware", "error_handling",
+                         "external_apis"],
+            "properties": {
+                "auth": SCHEMA_STR_ARRAY, "input_validation": SCHEMA_STR_ARRAY,
+                "database": SCHEMA_STR_ARRAY, "crypto": SCHEMA_STR_ARRAY,
+                "file_handling": SCHEMA_STR_ARRAY, "config": SCHEMA_STR_ARRAY,
+                "middleware": SCHEMA_STR_ARRAY, "error_handling": SCHEMA_STR_ARRAY,
+                "external_apis": SCHEMA_STR_ARRAY,
+            },
+        },
+        "modules": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["name", "paths", "loc_estimate", "risk",
+                             "depends_on", "description"],
+                "properties": {
+                    "name": SCHEMA_STR, "paths": SCHEMA_STR_ARRAY,
+                    "loc_estimate": SCHEMA_INT,
+                    "risk": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+                    "depends_on": SCHEMA_STR_ARRAY, "description": SCHEMA_STR,
+                },
+            },
+        },
+        "third_party_integrations": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["service", "purpose", "sdk", "config_location", "key_files"],
+                "properties": {
+                    "service": SCHEMA_STR, "purpose": SCHEMA_STR, "sdk": SCHEMA_STR,
+                    "config_location": SCHEMA_STR, "key_files": SCHEMA_STR_ARRAY,
+                },
+            },
+        },
+        "repo_stats": {
+            "type": "object", "additionalProperties": False,
+            "required": ["total_files", "total_loc"],
+            "properties": {"total_files": SCHEMA_INT, "total_loc": SCHEMA_INT},
+        },
+        "security_observations": SCHEMA_STR_ARRAY,
+    },
+}
+
 
 class ReconAgent(BaseAgent):
     name = "a1_recon"
@@ -40,6 +167,7 @@ class ReconAgent(BaseAgent):
     tools = "read_only"
     max_turns = 600
     timeout = 6000
+    output_schema = RECON_OUTPUT_SCHEMA
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner):
         super().__init__(config, output_dir, runner)

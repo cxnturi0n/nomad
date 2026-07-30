@@ -20,7 +20,11 @@ from pathlib import Path
 from typing import Optional
 
 from agents.base import BaseAgent
-from models.schemas import EngagementConfig
+from models.schemas import (
+    EngagementConfig,
+    SCHEMA_STR, SCHEMA_STR_ARRAY, SCHEMA_INT_NULL, SCHEMA_INT, SCHEMA_NUMBER,
+    SCHEMA_SEVERITY,
+)
 from utils.runners.base import BaseRunner, RunResult
 
 logger = logging.getLogger("nomad.agents.validation")
@@ -28,6 +32,65 @@ logger = logging.getLogger("nomad.agents.validation")
 PROMPT_FILE = Path(__file__).parent / "prompts" / "validation.md"
 
 MAX_FINDINGS_TO_VALIDATE = 20  # only validate top critical+high
+
+# JSON Schema for `claude --json-schema` (structured output). Mirrors the shapes
+# normalized in _validate_entries. CLI-strict: closed objects, all properties
+# required, nullable via ["type","null"]. `summary` is intentionally omitted —
+# parse_output always recomputes it from the validations, ignoring any model
+# value, so forcing the model to emit one would only waste tokens.
+VALIDATION_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["validations", "untested"],
+    "properties": {
+        "validations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "finding_id", "title", "status", "rounds", "final_poc",
+                    "final_response", "evidence", "defenses_bypassed", "notes",
+                    "severity_adjusted", "cvss_adjusted",
+                ],
+                "properties": {
+                    "finding_id": SCHEMA_STR, "title": SCHEMA_STR,
+                    "status": {"type": "string",
+                               "enum": ["confirmed", "not_exploitable", "needs_manual_review"]},
+                    "rounds": {
+                        "type": "array",
+                        "items": {
+                            "type": "object", "additionalProperties": False,
+                            "required": ["round", "technique", "poc_command",
+                                         "response_code", "response_excerpt", "result"],
+                            "properties": {
+                                "round": SCHEMA_INT, "technique": SCHEMA_STR,
+                                "poc_command": SCHEMA_STR, "response_code": SCHEMA_INT_NULL,
+                                "response_excerpt": SCHEMA_STR,
+                                "result": {"type": "string",
+                                           "enum": ["success", "blocked_by_waf",
+                                                    "blocked_by_filter", "blocked_by_rate_limit",
+                                                    "error", "inconclusive"]},
+                            },
+                        },
+                    },
+                    "final_poc": SCHEMA_STR, "final_response": SCHEMA_STR,
+                    "evidence": SCHEMA_STR, "defenses_bypassed": SCHEMA_STR_ARRAY,
+                    "notes": SCHEMA_STR, "severity_adjusted": SCHEMA_SEVERITY,
+                    "cvss_adjusted": SCHEMA_NUMBER,
+                },
+            },
+        },
+        "untested": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["finding_id", "reason"],
+                "properties": {"finding_id": SCHEMA_STR, "reason": SCHEMA_STR},
+            },
+        },
+    },
+}
 
 
 def _safe_list(val, max_items: int = 0) -> list:
@@ -57,6 +120,7 @@ class ValidationAgent(BaseAgent):
     tools = "full"  # needs bash for curl + network egress to the target
     max_turns = 80
     timeout = 1200  # 20 min — needs time for multiple curl rounds with delays
+    output_schema = VALIDATION_OUTPUT_SCHEMA
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner):
         super().__init__(config, output_dir, runner)

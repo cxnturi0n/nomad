@@ -22,12 +22,59 @@ from pathlib import Path
 from typing import Optional
 
 from agents.base import BaseAgent
-from models.schemas import EngagementConfig
+from models.schemas import (
+    EngagementConfig,
+    SCHEMA_STR, SCHEMA_STR_ARRAY, SCHEMA_INT_NULL, SCHEMA_SEVERITY, SCHEMA_CONFIDENCE,
+)
 from utils.runners.base import BaseRunner, RunResult
 
 logger = logging.getLogger("nomad.agents.secrets")
 
 PROMPT_FILE = Path(__file__).parent / "prompts" / "secrets.md"
+
+# JSON Schema for `claude --json-schema` (structured output). Mirrors the finding
+# shape normalized in _validate_findings. CLI-strict: closed objects, all
+# properties required, nullable via ["type","null"]. `id` is omitted (parser
+# assigns SEC-NNN) and `cwe_id` is a string ("CWE-798" or "") that parse_output
+# coerces to int. `notes` is a free-text escape hatch folded into description.
+# tool_results is omitted — parse_output rebuilds it from the actual tool runs.
+SECRETS_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["findings", "summary"],
+    "properties": {
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "title", "type", "service", "severity", "confidence", "file",
+                    "line_start", "line_end", "secret_preview", "full_context",
+                    "description", "active", "scope", "detection_source",
+                    "remediation", "cwe_id", "cwe_name", "notes",
+                ],
+                "properties": {
+                    "title": SCHEMA_STR, "type": SCHEMA_STR, "service": SCHEMA_STR,
+                    "severity": SCHEMA_SEVERITY, "confidence": SCHEMA_CONFIDENCE,
+                    "file": SCHEMA_STR, "line_start": SCHEMA_INT_NULL,
+                    "line_end": SCHEMA_INT_NULL, "secret_preview": SCHEMA_STR,
+                    "full_context": SCHEMA_STR, "description": SCHEMA_STR,
+                    "active": SCHEMA_STR, "scope": SCHEMA_STR,
+                    "detection_source": SCHEMA_STR, "remediation": SCHEMA_STR,
+                    "cwe_id": SCHEMA_STR, "cwe_name": SCHEMA_STR, "notes": SCHEMA_STR,
+                },
+            },
+        },
+        "summary": {
+            "type": "object", "additionalProperties": False,
+            "required": ["files_analyzed", "scope_notes"],
+            "properties": {
+                "files_analyzed": SCHEMA_STR_ARRAY, "scope_notes": SCHEMA_STR,
+            },
+        },
+    },
+}
 
 
 # ── Tool Runner Helpers ──────────────────────────────────────────────────────
@@ -244,6 +291,7 @@ class SecretsAgent(BaseAgent):
     tools = "read_only"
     max_turns = 50
     timeout = 600
+    output_schema = SECRETS_OUTPUT_SCHEMA
 
     def __init__(self, config: EngagementConfig, output_dir: Path, runner: BaseRunner):
         super().__init__(config, output_dir, runner)
@@ -429,6 +477,13 @@ class SecretsAgent(BaseAgent):
             if isinstance(cwe_id, str):
                 cwe_id = int(cwe_id.replace("CWE-", "").replace("cwe-", "")) if cwe_id.replace("CWE-", "").replace("cwe-", "").isdigit() else 798
 
+            # Fold the structured-mode `notes` escape hatch into description so
+            # off-schema detail the model parked there is never silently lost.
+            description = f.get("description", "")
+            notes = f.get("notes", "")
+            if isinstance(notes, str) and notes.strip():
+                description = f"{description}\n\n[notes] {notes}".strip() if description else notes.strip()
+
             valid.append({
                 "id": fid,
                 "title": f.get("title", "Untitled secret finding"),
@@ -441,7 +496,7 @@ class SecretsAgent(BaseAgent):
                 "line_end": f.get("line_end", f.get("line", None)),
                 "secret_preview": f.get("secret_preview", "REDACTED"),
                 "full_context": f.get("full_context", ""),
-                "description": f.get("description", ""),
+                "description": description,
                 "active": f.get("active", "unknown"),
                 "scope": f.get("scope", "unknown"),
                 "detection_source": f.get("detection_source", "manual"),

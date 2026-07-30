@@ -65,6 +65,7 @@ Go through this checklist for EVERY entry point and data flow. Do not skip any c
 - Server-Side Request Forgery / SSRF (CWE-918): User-controlled URLs passed to HTTP clients?
 - Insecure Deserialization (CWE-502): Untrusted data deserialized with pickle, yaml.load(), JSON.parse() on user classes?
 - Race Conditions (CWE-362): TOCTOU bugs? Concurrent access without locking on financial operations?
+- ReDoS / Inefficient Regex Complexity (CWE-1333): User input matched against a regex with nested or ambiguous quantifiers (e.g. `(a+)+`, `(\w+\s?)+`, `(.*)*`)? Catastrophic backtracking → CPU-exhaustion DoS. Check every `re.match`/`re.search`/validation pattern applied to request data.
 - Mass Assignment (CWE-915): Request body directly passed to ORM create/update without field whitelist?
 - Insecure File Upload (CWE-434): File type not validated? Files stored in web-accessible directory?
 - Open Redirect (CWE-601): User-controlled redirect URLs without whitelist validation?

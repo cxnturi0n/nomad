@@ -69,6 +69,7 @@ class BaseRunner(ABC):
 
     provider_name: str = "base"
     agentic: bool = True  # can iteratively use tools (shell / file browse / network) during a run
+    supports_structured_output: bool = False  # can constrain final output to a JSON Schema (no text-parse)
 
     def __init__(self, model: str = "", api_base: str = "", api_key: str = "", **kwargs):
         """
@@ -279,14 +280,11 @@ def _repair_truncated_json(text: str) -> Optional[dict]:
 
     candidate = text[:cut_pos + 1]
 
-    # Count unclosed braces and brackets
-    open_braces = candidate.count('{') - candidate.count('}')
-    open_brackets = candidate.count('[') - candidate.count(']')
-
-    # Close them
-    suffix = ''
-    # Close any open strings first (rough check)
-    # Count unescaped quotes
+    # Single string-aware pass: count structural braces/brackets only when OUTSIDE
+    # a string literal (so a brace inside a "value}" is not miscounted as a
+    # delimiter), and track whether the text ends mid-string.
+    open_braces = 0
+    open_brackets = 0
     in_str = False
     esc = False
     for ch in candidate:
@@ -298,11 +296,22 @@ def _repair_truncated_json(text: str) -> Optional[dict]:
             continue
         if ch == '"':
             in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == '{':
+            open_braces += 1
+        elif ch == '}':
+            open_braces -= 1
+        elif ch == '[':
+            open_brackets += 1
+        elif ch == ']':
+            open_brackets -= 1
 
+    # Close any open string first, then brackets, then braces.
+    suffix = ''
     if in_str:
         suffix += '"'
-
-    # Close brackets then braces
     suffix += ']' * max(0, open_brackets)
     suffix += '}' * max(0, open_braces)
 

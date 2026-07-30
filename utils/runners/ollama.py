@@ -57,6 +57,7 @@ class OllamaRunner(BaseRunner):
         max_turns: int = 30,
         timeout: int = 300,
         verbose: bool = False,
+        output_schema: dict | None = None,  # accepted for interface parity; not yet used (see supports_structured_output)
     ) -> RunResult:
         """
         Ollama runs in single-shot mode — no agentic tool loop.

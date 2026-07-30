@@ -56,6 +56,7 @@ _NETWORK_DENY = [
 
 class ClaudeRunner(BaseRunner):
     provider_name = "claude"
+    supports_structured_output = True  # via `claude --json-schema` (forced tool-use at emit time)
 
     def _resolve_tools(self, preset: str) -> list[str]:
         """Convert semantic tool preset to Claude Code --allowedTools list."""
@@ -89,6 +90,7 @@ class ClaudeRunner(BaseRunner):
         max_turns: int = 30,
         timeout: int = 300,
         verbose: bool = False,
+        output_schema: dict | None = None,
     ) -> RunResult:
         tool_list = self._resolve_tools(tools)
         tool_str = ",".join(tool_list)
@@ -99,6 +101,9 @@ class ClaudeRunner(BaseRunner):
         # (Linux execve has ~2MB arg limit; large codebases produce huge prompts)
         sys_file = os.path.join(tempfile.gettempdir(), f"nomad_sys_{os.getpid()}.txt")
         task_file = os.path.join(tempfile.gettempdir(), f"nomad_task_{os.getpid()}.txt")
+        # Schema file only when structured output is requested (see _parse_output).
+        schema_file = os.path.join(tempfile.gettempdir(), f"nomad_schema_{os.getpid()}.json")
+        temp_files = [sys_file, task_file]
 
         with open(sys_file, "w") as f:
             f.write(system_prompt)
@@ -121,6 +126,15 @@ class ClaudeRunner(BaseRunner):
         effort = self.extra_config.get("effort", "")
         if effort:
             shell_cmd += f' --effort {effort}'
+        # Native schema-constrained output: Claude explores with tools as usual,
+        # then the FINAL message is forced through a synthetic tool matching the
+        # schema. The envelope's `structured_output` carries the parsed object,
+        # so _parse_output skips all text extraction/repair. See --json-schema.
+        if output_schema:
+            with open(schema_file, "w") as f:
+                json.dump(output_schema, f)
+            temp_files.append(schema_file)
+            shell_cmd += f' --json-schema "$(cat \'{schema_file}\')"'
         if verbose:
             shell_cmd += ' --verbose'
 
@@ -247,8 +261,8 @@ class ClaudeRunner(BaseRunner):
                 provider="claude",
             )
         finally:
-            # Clean up temp files
-            for f in (sys_file, task_file):
+            # Clean up temp files (schema file only present in structured mode)
+            for f in temp_files:
                 try:
                     os.unlink(f)
                 except OSError:
@@ -272,6 +286,10 @@ class ClaudeRunner(BaseRunner):
         B) A JSON array of event objects, where the last element is the result:
            [{"type":"system",...}, {"type":"assistant",...}, ..., {"type":"result","result":"..."}]
 
+        When run with --json-schema, the envelope also carries a top-level
+        `structured_output` key holding the already-parsed, schema-valid object.
+        We prefer it — it needs no text extraction and cannot be malformed.
+
         Returns (parsed_content, cost_usd).
         """
         cost = 0.0
@@ -288,6 +306,9 @@ class ClaudeRunner(BaseRunner):
             for item in reversed(envelope):
                 if isinstance(item, dict) and item.get("type") == "result":
                     cost = item.get("total_cost_usd", item.get("cost_usd", 0.0))
+                    structured = item.get("structured_output")
+                    if isinstance(structured, (dict, list)) and structured:
+                        return structured, cost
                     content = item.get("result", "")
                     if content:
                         return extract_json_from_text(content), cost
@@ -298,8 +319,13 @@ class ClaudeRunner(BaseRunner):
 
         # Case A: Single JSON object envelope
         cost = envelope.get("total_cost_usd", envelope.get("cost_usd", 0.0))
-        content = envelope.get("result", "")
 
+        # Structured output (--json-schema): parsed + schema-valid, no repair needed.
+        structured = envelope.get("structured_output")
+        if isinstance(structured, (dict, list)) and structured:
+            return structured, cost
+
+        content = envelope.get("result", "")
         if not content:
             return envelope, cost
 

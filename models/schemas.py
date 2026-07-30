@@ -45,6 +45,24 @@ class AgentStatus(str, Enum):
     SKIPPED = "skipped"
 
 
+# ── JSON Schema fragments for provider-native structured output ──────────────
+# Reused by each agent's *_OUTPUT_SCHEMA constant (Claude `--json-schema`). Kept
+# here so the six agent schemas stay consistent. CLI-strict semantics: closed
+# objects (additionalProperties=false), every property in `required`, nullable
+# expressed as ["type", "null"]. These are READ-ONLY singletons — never mutate
+# them in place. The schema only guarantees SHAPE; each agent's parse_output()
+# still normalizes values.
+SCHEMA_STR = {"type": "string"}
+SCHEMA_STR_ARRAY = {"type": "array", "items": {"type": "string"}}
+SCHEMA_INT_NULL = {"type": ["integer", "null"]}
+SCHEMA_STR_NULL = {"type": ["string", "null"]}
+SCHEMA_NUMBER = {"type": "number"}
+SCHEMA_BOOL = {"type": "boolean"}
+SCHEMA_INT = {"type": "integer"}
+SCHEMA_SEVERITY = {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]}
+SCHEMA_CONFIDENCE = {"type": "string", "enum": ["high", "medium", "low"]}
+
+
 # ── Recon Report (A1 output) ────────────────────────────────────────────────
 
 @dataclass
@@ -128,6 +146,7 @@ class EngagementConfig:
     model_light: str = ""          # cheaper model (same provider) for low-stakes agents
     light_agents: list[str] = field(default_factory=list)  # agents that use model_light
     effort: str = ""               # reasoning effort (claude only): low|medium|high|max
+    structured_output: bool = False  # provider-native schema-constrained output (claude only, pilot: static)
     api_key: str = ""              # API key override (providers read env by default)
     base_url: str = ""
     tokens: list[str] = field(default_factory=list)
