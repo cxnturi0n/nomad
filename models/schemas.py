@@ -162,6 +162,7 @@ class EngagementConfig:
     max_concurrent: int = 5
     verbose: bool = False
     skip_agents: list[str] = field(default_factory=list)
+    excluded_paths: list[str] = field(default_factory=list)  # repo-relative dirs/files to omit from analysis
     ollama_host: str = ""          # Ollama server URL (default: http://localhost:11434)
     caveman: bool = False          # Terse caveman-style output (reduces token usage ~75%)
 

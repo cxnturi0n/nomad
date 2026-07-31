@@ -143,6 +143,41 @@ class TestScalingEngine(unittest.TestCase):
         self.assertEqual(len(parts), 1)
         self.assertEqual(parts[0]["scope_name"], "full_repo")
 
+    def test_exclude_filters_partition_paths(self):
+        cfg = EngagementConfig(repo_path="/tmp", scope=ScanMode.FULL,
+                               excluded_paths=["admin"])
+        report = {
+            "repo_stats": {"total_loc": 60_000},
+            "modules": [
+                {"name": "admin_panel", "risk": "high", "paths": ["admin", "admin/sub"]},
+                {"name": "api", "risk": "high", "paths": ["api", "admin/leak"]},
+            ],
+            "critical_files": {},
+        }
+        eng = self.nomad.ScalingEngine(report, cfg)
+        eng._get_shared_files = lambda: ["config.php", "admin/shared.php"]
+        eng._cross_cutting_files = lambda m: []
+        parts = {p["scope_name"]: p["paths"] for p in eng.get_partitions()}
+        # module entirely under admin/ is dropped
+        self.assertNotIn("admin_panel", parts)
+        # excluded path pruned from a mixed module, non-excluded kept
+        self.assertEqual(parts["api"], ["api"])
+        # excluded path pruned from shared/cross-cutting set
+        self.assertEqual(parts["cross_cutting"], ["config.php"])
+
+
+class TestExclusionDirective(unittest.TestCase):
+    def test_empty_when_no_excludes(self):
+        from agents.base import build_exclusion_directive
+        self.assertEqual(build_exclusion_directive([]), "")
+
+    def test_lists_excluded_paths(self):
+        from agents.base import build_exclusion_directive
+        out = build_exclusion_directive(["admin", "vendor/lib"])
+        self.assertIn("OUT OF SCOPE", out)
+        self.assertIn("admin", out)
+        self.assertIn("vendor/lib", out)
+
 
 class TestCliHelp(unittest.TestCase):
     def test_help_exposes_no_safe_only(self):
@@ -155,6 +190,7 @@ class TestCliHelp(unittest.TestCase):
         self.assertIn("--no-safe-only", proc.stdout)
         self.assertIn("--model-light", proc.stdout)
         self.assertIn("--effort", proc.stdout)
+        self.assertIn("--exclude", proc.stdout)
 
     def test_light_agents_requires_model_light(self):
         # --light-agents without --model-light must be a hard error.

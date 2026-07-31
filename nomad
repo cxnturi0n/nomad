@@ -198,6 +198,12 @@ Examples:
         "--caveman", action="store_true",
         help="Enable caveman mode: terse agent output, reduces token usage ~75%% (Claude Code plugin)",
     )
+    parser.add_argument(
+        "--exclude", nargs="*", default=[],
+        metavar="PATH",
+        help="Repo-relative dirs/files to omit from analysis (e.g. --exclude admin vendor). "
+             "Applied to every agent + the semgrep pre-scan.",
+    )
 
     args = parser.parse_args()
 
@@ -208,6 +214,28 @@ Examples:
 
     if args.validate and not args.base_url:
         parser.error("--validate requires --base-url")
+
+    # Normalize --exclude to clean repo-relative POSIX paths (strip ./, trailing /,
+    # and rebase absolute paths that live under the repo). Warn on entries that
+    # don't resolve to anything so a typo can't silently scan what you meant to skip.
+    excluded_paths = []
+    for raw in args.exclude:
+        p = raw.strip()
+        if not p:
+            continue
+        candidate = Path(p)
+        if candidate.is_absolute():
+            try:
+                p = str(candidate.resolve().relative_to(repo_path))
+            except ValueError:
+                parser.error(f"--exclude path is outside the repo: {raw}")
+        p = p.strip("/").removeprefix("./")
+        if not p or p == ".":
+            parser.error("--exclude cannot exclude the repo root")
+        if not (repo_path / p).exists():
+            print(f"warning: --exclude path not found in repo (kept as filter): {p}")
+        if p not in excluded_paths:
+            excluded_paths.append(p)
 
     # Validate --skip values
     valid_skips = {"static", "secrets", "deps", "triage", "fingerprint", "validation"}
@@ -256,6 +284,7 @@ Examples:
         ollama_host=args.ollama_host,
         skip_agents=args.skip,
         caveman=args.caveman,
+        excluded_paths=excluded_paths,
     )
 
 
@@ -314,6 +343,21 @@ class ScalingEngine:
         else:
             return "hybrid"
 
+    def _is_excluded(self, path: str) -> bool:
+        """True if a repo-relative path lies under any --exclude entry."""
+        p = str(path).strip("/").removeprefix("./")
+        for ex in self.config.excluded_paths:
+            if p == ex or p.startswith(ex + "/"):
+                return True
+        return False
+
+    def _filter_excluded(self, paths: list) -> list:
+        """Drop paths under an excluded dir. '.' (whole repo) is kept — the
+        per-agent directive + semgrep --exclude carve out the excluded subtree."""
+        if not self.config.excluded_paths:
+            return paths
+        return [p for p in paths if p == "." or not self._is_excluded(p)]
+
     def get_partitions(self) -> list[dict]:
         strategy = self.get_strategy()
 
@@ -322,21 +366,24 @@ class ScalingEngine:
                 "scope_name": "full_repo",
                 "paths": ["."],
                 "risk": "high",
-                "context_files": self._all_critical_files(),
+                "context_files": self._filter_excluded(self._all_critical_files()),
             }]
 
         partitions = []
         for mod in self._prioritized_modules():
             if self.config.scope == ScanMode.QUICK and mod.get("risk") == "low":
                 continue
+            paths = self._filter_excluded(mod.get("paths", []))
+            if mod.get("paths") and not paths:
+                continue  # entire module was under an excluded path
             partitions.append({
                 "scope_name": mod["name"],
-                "paths": mod.get("paths", []),
+                "paths": paths,
                 "risk": mod.get("risk", "medium"),
-                "context_files": self._cross_cutting_files(mod),
+                "context_files": self._filter_excluded(self._cross_cutting_files(mod)),
             })
 
-        shared = self._get_shared_files()
+        shared = self._filter_excluded(self._get_shared_files())
         if shared:
             partitions.append({
                 "scope_name": "cross_cutting",
@@ -493,6 +540,8 @@ class Pipeline:
 
         if self.config.skip_agents:
             logger.info(f"  Skipping:   {', '.join(self.config.skip_agents)}")
+        if self.config.excluded_paths:
+            logger.info(f"  Excluding:  {', '.join(self.config.excluded_paths)}")
         if self.completed_phases:
             logger.info(f"  Resuming:   {', '.join(sorted(self.completed_phases))} already done")
         logger.info("")

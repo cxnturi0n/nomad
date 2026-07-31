@@ -27,7 +27,7 @@ logger = logging.getLogger("nomad.agents.static_analysis")
 PROMPT_FILE = Path(__file__).parent / "prompts" / "static_analysis.md"
 
 # Semgrep SAST is run once per repo and cached (A2 may instantiate per-partition).
-_SEMGREP_SAST_CACHE: dict[str, list] = {}
+_SEMGREP_SAST_CACHE: dict[tuple, list] = {}
 
 _SAST_CONFIGS = [
     "p/security-audit", "p/owasp-top-ten", "p/command-injection",
@@ -87,7 +87,7 @@ STATIC_OUTPUT_SCHEMA = {
 }
 
 
-def run_semgrep_sast(repo_path: str, timeout: int = 300) -> list:
+def run_semgrep_sast(repo_path: str, timeout: int = 300, excluded: list = None) -> list:
     """Run Semgrep SAST rulesets once; return raw results (or [] if unavailable)."""
     if not shutil.which("semgrep"):
         logger.info("[a2_static] semgrep not installed — skipping SAST pre-scan")
@@ -95,6 +95,14 @@ def run_semgrep_sast(repo_path: str, timeout: int = 300) -> list:
     cmd = ["semgrep", "scan"]
     for c in _SAST_CONFIGS:
         cmd += ["--config", c]
+    # semgrep --exclude globs match path segments; add the basename too so a
+    # nested path like "app/admin" is still excluded by its "admin" segment.
+    seen = set()
+    for pattern in (excluded or []):
+        for pat in (pattern, pattern.rsplit("/", 1)[-1]):
+            if pat and pat not in seen:
+                seen.add(pat)
+                cmd += ["--exclude", pat]
     cmd += ["--json", "--quiet", "--no-git-ignore", "--timeout", "30", repo_path]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -266,10 +274,11 @@ No markdown, no prose — just valid JSON starting with {{ and ending with }}.""
 
     def _semgrep_findings(self) -> list:
         """Semgrep SAST results for this repo (run once, cached across partitions)."""
-        repo = self.config.repo_path
-        if repo not in _SEMGREP_SAST_CACHE:
-            _SEMGREP_SAST_CACHE[repo] = run_semgrep_sast(repo)
-        return _SEMGREP_SAST_CACHE[repo]
+        excluded = getattr(self.config, "excluded_paths", []) or []
+        key = (self.config.repo_path, tuple(sorted(excluded)))
+        if key not in _SEMGREP_SAST_CACHE:
+            _SEMGREP_SAST_CACHE[key] = run_semgrep_sast(self.config.repo_path, excluded=excluded)
+        return _SEMGREP_SAST_CACHE[key]
 
     def _build_semgrep_context(self, partition: dict) -> str:
         """Inject Semgrep SAST findings (filtered to this partition) as leads to validate."""

@@ -51,6 +51,9 @@ python3 nomad --repo /path/to/target-app --skip deps triage
 
 # Only recon + static analysis
 python3 nomad --repo /path/to/target-app --skip secrets deps triage fingerprint validation
+
+# Exclude out-of-scope folders (repo-relative; applied to every agent + semgrep)
+python3 nomad --repo /path/to/target-app --exclude admin vendor
 ```
 
 ## Agent Pipeline
@@ -95,6 +98,7 @@ A1 feeds every downstream agent. A2/A3/A4 run independently and produce findings
 | `--scope` | `full`, `quick`, `secrets_only`, `deps_only` | `full` |
 | `--severity-threshold` | `critical`, `high`, `medium`, `low`, `info` | `low` |
 | `--skip` | Agents to skip: `static`, `secrets`, `deps`, `triage`, `fingerprint`, `validation` | none |
+| `--exclude` | Repo-relative dirs/files to omit from analysis (every agent + semgrep) | none |
 | `--validate` | Enable active exploit testing (AFP + A7) | off |
 | `--safe-only` / `--no-safe-only` | Non-destructive PoCs only; `--no-safe-only` permits destructive tests | `true` |
 | `--base-url` | Running app URL (required with `--validate`) | — |

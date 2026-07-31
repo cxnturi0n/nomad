@@ -34,6 +34,26 @@ Boundaries: code/commits/PRs written normal.
 """
 
 
+def build_exclusion_directive(excluded_paths: list) -> str:
+    """Directive appended to every agent's task prompt when --exclude is set.
+
+    The agents are agentic (they browse the repo themselves), so exclusion is
+    enforced by instruction rather than by withholding a file list. Semgrep and
+    the partition scoping filter the same paths on their own layers.
+    """
+    if not excluded_paths:
+        return ""
+    listed = "\n".join(f"  - {p}" for p in excluded_paths)
+    return (
+        "\n\n# EXCLUDED FROM SCOPE — DO NOT ANALYZE\n"
+        "The following repo-relative paths are OUT OF SCOPE for this engagement. "
+        "Do NOT read, browse, grep, analyze, or report anything located under them. "
+        "Skip them entirely as if they did not exist. If a tool result references a "
+        "path under one of these, ignore that entry.\n"
+        f"{listed}\n"
+    )
+
+
 class BaseAgent(ABC):
     """
     Every agent must:
@@ -105,6 +125,7 @@ class BaseAgent(ABC):
             if self.config.caveman:
                 system_prompt += CAVEMAN_DIRECTIVE
             task_prompt = self.get_task_prompt(context)
+            task_prompt += build_exclusion_directive(getattr(self.config, "excluded_paths", []))
 
             use_structured = self._use_structured()
             if use_structured:
